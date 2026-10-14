@@ -1,0 +1,21 @@
+<resources>
+    <string name="camera_preview_description">უკანა კამერის პირდაპირი ხედი</string>
+
+    <string name="permission_needed_title">KioskVision-ს კამერა სჭირდება</string>
+    <string name="permission_needed_message">კამერა გვჭირდება, რომ დავინახოთ ტერმინალის ეკრანი და დაგეხმაროთ საჭირო ღილაკის პოვნაში. გაგრძელების შემდეგ Android კამერაზე წვდომის ნებართვას მოგთხოვთ.</string>
+    <string name="permission_denied_title">კამერაზე წვდომა არ არის დაშვებული</string>
+    <string name="permission_denied_message">კამერის გარეშე KioskVision ვერ დაინახავს ტერმინალის ეკრანს. აირჩიეთ „ხელახლა ცდა“ და Android-ის ფანჯარაში დაუშვით კამერაზე წვდომა.</string>
+    <string name="permission_blocked_title">კამერაზე წვდომა გამორთულია</string>
+    <string name="permission_blocked_message">Android კამერაზე წვდომას აღარ მოითხოვს. აირჩიეთ „პარამეტრების გახსნა“, გახსენით ნებართვები, შემდეგ კამერა და დაუშვით წვდომა. ამის შემდეგ დაბრუნდით KioskVision-ში.</string>
+
+    <string name="status_camera_starting">კამერა ირთვება…</string>
+    <string name="status_camera_on">უკანა კამერა ჩართულია.</string>
+    <string name="status_camera_missing">ამ მოწყობილობაზე უკანა კამერა ვერ მოიძებნა.</string>
+    <string name="status_camera_busy">კამერას სხვა აპი იყენებს. KioskVision ავტომატურად სცდის ხელახლა.</string>
+    <string name="status_camera_disabled">კამერა ამ მოწყობილობაზე გამორთულია პარამეტრით ან მოწყობილობის პოლიტიკით.</string>
+    <string name="status_camera_failed">კამერის ჩართვა ვერ მოხერხდა.</string>
+
+    <string name="action_continue">გაგრძელება</string>
+    <string name="action_try_again">ხელახლა ცდა</string>
+    <string name="action_open_settings">პარამეტრების გახსნა</string>
+</resources>

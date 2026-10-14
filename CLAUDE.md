@@ -32,12 +32,24 @@ The project will not move to Phase 1 (first spike) until the user approves it.
 7. `docs/SAFETY_AND_PRIVACY.md` — safety invariants.
 8. `docs/TEST_STRATEGY.md` — test and validation plan.
 
+## Repository layout and platforms
+
+The product is built natively for both platforms (ADR-008):
+
+- `android/` — Android app: Kotlin, Jetpack Compose, CameraX, Gradle.
+  Package `com.cellfie.kioskvision`.
+- `ios/` — iOS app: Swift, Xcode project (not created yet).
+
+Documentation in `docs/` is shared. Where a doc names an Apple framework,
+check whether an Android equivalent has been measured before assuming it.
+
 ## Coding and architecture principles
 
-- Swift, native iOS, Xcode project.
-- Prefer Apple frameworks (AVFoundation, Vision, ARKit, AVFAudio) when
-  measurement shows they meet requirements. They explicitly do **not** cover
-  Georgian for STT/TTS/OCR — see `SPIKES_AND_DECISIONS.md`.
+- Native code per platform: Kotlin + Compose on Android, Swift on iOS.
+- Prefer platform frameworks (Apple: AVFoundation, Vision, ARKit, AVFAudio;
+  Android: CameraX, ARCore, platform TTS) when measurement shows they meet
+  requirements. Apple's frameworks explicitly do **not** cover Georgian for
+  STT/TTS/OCR, and ML Kit OCR does not either — see `SPIKES_AND_DECISIONS.md`.
 - Keep safety-critical behavior deterministic. A language model may help
   interpret user intent; it must not independently authorize a target press or
   transaction confirmation.

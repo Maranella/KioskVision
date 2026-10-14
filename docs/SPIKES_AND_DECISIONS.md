@@ -314,6 +314,30 @@ go direct from the device to the vendor over TLS with device-held keys.
 
 ---
 
+### ADR-008 — Build for Android alongside iOS
+
+**Status.** Accepted (product owner decision, 2026-10-14).
+
+**Context.** The original plan targeted iOS only. An Android app
+(Kotlin, Compose, CameraX) was started in parallel and reached a working
+camera foundation with an accessible camera-permission flow. The product
+owner decided to keep both platforms in this repository.
+
+**Decision.** Maintain native apps for both platforms: `android/` and
+`ios/`. Documentation stays shared.
+
+**Consequences.**
+- ADR-001 (iPhone Pro / LiDAR baseline) only covers iOS. Most Android
+  phones have no LiDAR/ToF sensor, so on Android finger guidance must rely
+  on ARCore depth (where supported) or pure 2D geometry, which R-07 shows
+  is parallax-limited. Spike-01 must measure the Android path separately.
+- Apple-specific findings (R-01–R-03, R-09) do not transfer to Android;
+  Android equivalents (e.g. MediaPipe hand landmarks, Android TTS voices)
+  need their own measurements.
+- Roughly doubles platform implementation effort for every milestone.
+
+---
+
 ## Open spikes (planned, not yet executed)
 
 | ID | Title | Goal | Owner | Status |

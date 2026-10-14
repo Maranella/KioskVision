@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name" translatable="false">KioskVision</string>
+
+    <string name="camera_preview_description">Live view from the rear camera</string>
+
+    <string name="permission_needed_title">KioskVision needs the camera</string>
+    <string name="permission_needed_message">The camera lets us see the terminal screen and help you find the button you need. After you continue, Android will ask you to allow camera access.</string>
+    <string name="permission_denied_title">Camera access was not allowed</string>
+    <string name="permission_denied_message">Without the camera, KioskVision cannot see the terminal screen. Select Try again, and in the Android window choose to allow camera access.</string>
+    <string name="permission_blocked_title">Camera access is turned off</string>
+    <string name="permission_blocked_message">Android will no longer ask for camera access. Select Open settings, open Permissions, then Camera, and allow access. Then return to KioskVision.</string>
+
+    <string name="status_camera_starting">Starting camera…</string>
+    <string name="status_camera_on">Rear camera is on.</string>
+    <string name="status_camera_missing">No rear camera was found on this device.</string>
+    <string name="status_camera_busy">The camera is being used by another app. KioskVision will try again automatically.</string>
+    <string name="status_camera_disabled">The camera is disabled on this device by a setting or device policy.</string>
+    <string name="status_camera_failed">The camera could not be started.</string>
+
+    <string name="action_continue">Continue</string>
+    <string name="action_try_again">Try again</string>
+    <string name="action_open_settings">Open settings</string>
+</resources>

@@ -15,9 +15,20 @@
   ADRs recorded in `SPIKES_AND_DECISIONS.md` (R-01 through R-10;
   ADR-001 through ADR-007, all `proposed`).
 
+- **Android camera foundation** (`android/`, ADR-008):
+  - Launch from the launcher or via the system assistant ("Hey Google,
+    open KioskVision") — standard `MAIN`/`LAUNCHER` activity, no extra
+    integration.
+  - CameraX rear-camera live preview, lifecycle-bound (released in the
+    background, single binding after resume and rotation).
+  - Accessible camera-permission flow: explanation screen before the
+    system dialog, denied / permanently-denied recovery via Settings,
+    Georgian strings (`values-ka`), TalkBack semantics.
+
 ## In progress
 
-- Nothing. Awaiting user review and approval of Phase 1 (Spike-01).
+- Spike-01 (finger guidance) — approved by the product owner on
+  2026-10-14; platform and scope being confirmed.
 
 ## Verified results (what we actually know as fact right now)
 
@@ -30,6 +41,14 @@
 - Open-source Georgian stacks exist (Tesseract `kat.traineddata`, Piper
   `ka_GE natia-medium`, Whisper tokenizer includes `ka`). Subjective
   quality on our targets is **unverified**.
+
+- Android foundation — **verified on the Android emulator only**
+  (2026-10-14): debug build, 9 JVM unit tests, permission grant / deny /
+  permanent deny / Settings recovery / revoke-in-background, camera
+  released on Home and a single camera client after return and rotation.
+- **Not yet verified on Android:** a physical device, TalkBack speech
+  (including whether a Georgian TTS voice is available), voice-assistant
+  launch, real camera error paths.
 
 ## Hypotheses to validate (not yet verified)
 
