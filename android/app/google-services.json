@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "107895400234",
+    "project_id": "kioskvision-856bd",
+    "storage_bucket": "kioskvision-856bd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:107895400234:android:db35b1ecf1ecea3d16e053",
+        "android_client_info": {
+          "package_name": "com.maranella.kioskvision"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDmx5fmJfGDYsQq1bsHrexELLPEwj3KTK4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

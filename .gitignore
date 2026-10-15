@@ -1,9 +1,1 @@
 .DS_Store
-
-# Firebase project configuration. Held out of version control pending a
-# decision from the product owner: it carries the project id, app id and the
-# Android API key. None of those are secrets by Google's design (access is
-# controlled by App Check and Firebase rules, and the key is restricted by
-# package name), and Android projects normally do commit this file — but
-# adding it later is one line, while removing it from history is not.
-android/app/google-services.json
