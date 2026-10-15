@@ -8,7 +8,37 @@
         android:name="android.hardware.camera"
         android:required="true" />
 
+    <!-- Voice commands work without a microphone being required to install. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- A short buzz tells a blind user when the microphone is actually open. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Requested only when the user first presses "Voice command". -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- MediaPipe's transitive usage-logging transport (com.google.android.datatransport) adds
+         these. KioskVision needs no network: OCR and hand tracking run on-device, and speech
+         recognition/TTS run in their own system apps. Removing them guarantees camera frames
+         and screen text cannot leave the device from this app. -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
+
+    <!-- Android 11+ package visibility: needed to find the speech recognizer and TTS engines. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"

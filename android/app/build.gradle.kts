@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.cellfie.kioskvision"
+    namespace = "com.maranella.kioskvision"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.cellfie.kioskvision"
+        applicationId = "com.maranella.kioskvision"
         minSdk = 24
         targetSdk = 37
         versionCode = 1
@@ -33,6 +33,13 @@ android {
     buildFeatures {
         compose = true
     }
+    bundle {
+        // Spoken messages are rendered in the voice's language (Georgian or English), which
+        // may differ from the device language, so every language must be installed.
+        language {
+            enableSplit = false
+        }
+    }
 }
 
 dependencies {
@@ -49,6 +56,8 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+    implementation(libs.mediapipe.tasks.vision)
+    implementation(libs.tesseract4android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

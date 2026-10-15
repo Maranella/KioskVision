@@ -18,4 +18,66 @@
     <string name="action_continue">გაგრძელება</string>
     <string name="action_try_again">ხელახლა ცდა</string>
     <string name="action_open_settings">პარამეტრების გახსნა</string>
+
+    <!-- Live assist UI -->
+    <string name="action_voice_command">ხმოვანი ბრძანება</string>
+    <string name="action_cancel_listening">მოსმენის შეწყვეტა</string>
+    <string name="action_repeat">გაიმეორე</string>
+    <string name="action_stop_guidance">მიმართულების შეჩერება</string>
+    <string name="action_rescan">ეკრანის თავიდან წაკითხვა</string>
+    <string name="action_debug_overlay">დეველოპერის ფენა</string>
+    <string name="action_not_now">ახლა არა</string>
+    <string name="status_listening">გისმენთ… თქვით, რა გსურთ.</string>
+    <string name="label_heard">გავიგე: %1$s</string>
+    <string name="label_target">სამიზნე: %1$s</string>
+    <string name="label_guidance">მიმართულება: %1$s</string>
+    <string name="label_target_reached">ღილაკთან ხართ. დააჭირეთ თავად.</string>
+    <string name="hint_hold_steady">ეკრანი კადრში დაიჭირე, პირდაპირ მიმართული.</string>
+    <string name="status_engines_loading">ტექსტისა და ხელის ამოცნობა მზადდება…</string>
+    <string name="warning_ocr_unavailable">ტექსტის ამოცნობა ამ მოწყობილობაზე ვერ ჩაირთო.</string>
+    <string name="warning_hand_unavailable">ხელის თვალყურის დევნება ამ მოწყობილობაზე ვერ ჩაირთო.</string>
+    <string name="warning_georgian_voice_missing">ქართული ხმა დაყენებული არ არის, ამიტომ მითითებები ინგლისურად ისმის. ქართულად მოსასმენად დააყენეთ ტექსტის გახმოვანების აპი ქართული ხმით, მაგალითად RHVoice, და თავიდან გახსენით KioskVision.</string>
+    <string name="warning_speech_output_unavailable">ხმოვანი გამოტანა ამ მოწყობილობაზე მიუწვდომელია. შეტყობინებები ეკრანზე ჩანს.</string>
+    <string name="warning_recognition_unavailable">მეტყველების ამოცნობა ამ მოწყობილობაზე მიუწვდომელია.</string>
+    <string name="warning_georgian_recognition_missing">ამ მოწყობილობის მეტყველების ამოცნობას ქართული არ აქვს, ამიტომ ხმოვანი ბრძანებები შეიძლება არასწორად გაიგოს. დაამატეთ ქართული სისტემის პარამეტრებში.</string>
+
+    <!-- Microphone permission -->
+    <string name="mic_permission_title">მიკროფონი ხმოვანი ბრძანებებისთვის</string>
+    <string name="mic_permission_message">KioskVision გისმენთ მხოლოდ მას შემდეგ, რაც „ხმოვან ბრძანებას“ დააჭერთ, რომ გაიგოს, რომელი ღილაკი გჭირდებათ. აპი ჩანაწერებს არ ინახავს. გაგრძელების შემდეგ Android მიკროფონზე წვდომის ნებართვას მოგთხოვთ.</string>
+    <string name="mic_denied_title">მიკროფონზე წვდომა არ არის დაშვებული</string>
+    <string name="mic_denied_message">მიკროფონის გარეშე ხმოვანი ბრძანებები ვერ იმუშავებს. კამერა კვლავ მუშაობს. აირჩიეთ „ხელახლა ცდა“ და Android-ის ფანჯარაში დაუშვით მიკროფონზე წვდომა.</string>
+    <string name="mic_blocked_title">მიკროფონზე წვდომა გამორთულია</string>
+    <string name="mic_blocked_message">Android მიკროფონზე წვდომას აღარ მოითხოვს. აირჩიეთ „პარამეტრების გახსნა“, გახსენით ნებართვები, შემდეგ მიკროფონი და დაუშვით წვდომა. ამის შემდეგ დაბრუნდით KioskVision-ში.</string>
+
+    <!-- Spoken by the app -->
+    <string name="speak_direction_left">ცოტა მარცხნივ.</string>
+    <string name="speak_direction_right">ოდნავ მარჯვნივ.</string>
+    <string name="speak_direction_up">ოდნავ მაღლა.</string>
+    <string name="speak_direction_down">ცოტა ქვემოთ.</string>
+    <string name="speak_direction_near">ნელა, უკვე ახლოს ხარ.</string>
+    <string name="speak_direction_on_target">გაჩერდი, ღილაკთან ხარ. შეგიძლია დააჭირო.</string>
+    <string name="speak_hand_not_detected">ხელს ვერ ვხედავ. მთელი ხელი შემოიტანე კადრში, ტელეფონთან უფრო შორს და ეკრანთან ახლოს.</string>
+    <string name="speak_target_selected">ვიპოვე: %1$s. საჩვენებელი თითი ეკრანთან მიიტანე.</string>
+    <string name="speak_target_selected_critical">ვიპოვე: %1$s. დაჭერამდე დეტალები გადაამოწმე: თქვი „ეკრანზე რა წერია“.</string>
+    <string name="speak_target_not_found">„%1$s“ ეკრანზე ვერ ვიპოვე.</string>
+    <string name="speak_target_ambiguous">რომელი: %1$s თუ %2$s?</string>
+    <string name="speak_screen_contents">ეკრანზე: %1$s.</string>
+    <string name="speak_screen_some_unreadable">ზოგიერთი ტექსტი საიმედოდ ვერ წავიკითხე.</string>
+    <string name="speak_no_text_visible">ტექსტს ვერ ვხედავ. კამერა ეკრანისკენ მიმართე.</string>
+    <string name="speak_ocr_not_ready">ტექსტის ამოცნობა ჯერ მზად არ არის.</string>
+    <string name="speak_screen_changed">ეკრანი შეიცვალა.</string>
+    <string name="speak_screen_out_of_focus">ეკრანი ბუნდოვანია, ოდნავ შეცვალე კამერის კუთხე.</string>
+    <string name="speak_cannot_read_text">ტექსტს ვერ ვკითხულობ. ცოტა მიუახლოვდი ეკრანს.</string>
+    <string name="speak_target_uncertain">ღილაკისკენ მითითება ახლა ვერ ხერხდება.</string>
+    <string name="speak_target_position_lost">ღილაკის ადგილი დავკარგე. ეკრანი კადრში დატოვე.</string>
+    <string name="speak_reading_screen">ეკრანს ვამოწმებ.</string>
+    <string name="speak_hold_still">ეკრანი ერთი წამით დამანახე.</string>
+    <string name="speak_guidance_stopped">მიმართულება შეჩერდა.</string>
+    <string name="speak_not_understood">ვერ გავიგე. სცადე ხელახლა.</string>
+    <string name="speak_recognition_no_speech">ვერაფერი გავიგე.</string>
+    <string name="speak_recognition_network">მეტყველების ამოცნობას ინტერნეტი სჭირდება.</string>
+    <string name="speak_recognition_language">ქართული მეტყველების ამოცნობა ამ მოწყობილობაზე მიუწვდომელია.</string>
+    <string name="speak_recognition_unavailable">მეტყველების ამოცნობა ამ მოწყობილობაზე მიუწვდომელია.</string>
+    <string name="speak_recognition_permission">ხმოვანი ბრძანებებისთვის მიკროფონზე წვდომაა საჭირო.</string>
+    <string name="speak_recognition_failed">მეტყველების ამოცნობა ვერ მოხერხდა. სცადე ხელახლა.</string>
 </resources>

@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "One entry per photograph. Boxes are [left, top, right, bottom] as fractions of the image,",
+    "so they stay correct whatever resolution the photo was taken at.",
+    "'lines' is every line of text visible on the kiosk screen, transcribed by hand, in reading",
+    "order. 'controls' are the actionable buttons only. 'queries' are what a user would say and",
+    "which control they should reach. Omit 'queries' to skip target evaluation for an image.",
+    "Do NOT include PINs, card numbers, balances, names or any other personal data."
+  ],
+  "images": [
+    {
+      "file": "kiosk-01.jpg",
+      "screen": "main-menu",
+      "conditions": {
+        "distance": "40cm",
+        "angle": "frontal",
+        "lighting": "indoor-bright",
+        "glare": "none",
+        "blur": "sharp",
+        "text_px": "28"
+      },
+      "lines": [
+        "რას გინდა გააკეთო?",
+        "გადახდა",
+        "ბალანსის შემოწმება"
+      ],
+      "controls": [
+        { "label": "გადახდა", "box": [0.08, 0.46, 0.46, 0.54] },
+        { "label": "ბალანსის შემოწმება", "box": [0.52, 0.46, 0.94, 0.54] }
+      ],
+      "queries": [
+        { "say": "გადახდა მინდა", "expect": "გადახდა" }
+      ]
+    }
+  ]
+}

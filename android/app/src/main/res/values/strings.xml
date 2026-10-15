@@ -20,4 +20,66 @@
     <string name="action_continue">Continue</string>
     <string name="action_try_again">Try again</string>
     <string name="action_open_settings">Open settings</string>
+
+    <!-- Live assist UI -->
+    <string name="action_voice_command">Voice command</string>
+    <string name="action_cancel_listening">Stop listening</string>
+    <string name="action_repeat">Repeat</string>
+    <string name="action_stop_guidance">Stop guidance</string>
+    <string name="action_rescan">Read screen again</string>
+    <string name="action_debug_overlay">Developer overlay</string>
+    <string name="action_not_now">Not now</string>
+    <string name="status_listening">Listening… say what you want.</string>
+    <string name="label_heard">Heard: %1$s</string>
+    <string name="label_target">Target: %1$s</string>
+    <string name="label_guidance">Guidance: %1$s</string>
+    <string name="label_target_reached">At the button. You press it yourself.</string>
+    <string name="hint_hold_steady">Keep the kiosk screen in view, facing it straight on.</string>
+    <string name="status_engines_loading">Preparing text and hand recognition…</string>
+    <string name="warning_ocr_unavailable">Text recognition could not start on this device.</string>
+    <string name="warning_hand_unavailable">Hand tracking could not start on this device.</string>
+    <string name="warning_georgian_voice_missing">No Georgian voice is installed, so spoken guidance is in English. To hear Georgian, install a text-to-speech app with a Georgian voice, for example RHVoice, then restart KioskVision.</string>
+    <string name="warning_speech_output_unavailable">Spoken output is not available on this device. Messages are shown on screen.</string>
+    <string name="warning_recognition_unavailable">Speech recognition is not available on this device.</string>
+    <string name="warning_georgian_recognition_missing">This device&#8217;s speech recognition does not offer Georgian, so spoken commands may be misheard. Add Georgian to the speech recognition languages in the system settings.</string>
+
+    <!-- Microphone permission -->
+    <string name="mic_permission_title">Microphone for voice commands</string>
+    <string name="mic_permission_message">KioskVision listens only after you press Voice command, to hear which button you want. The app does not save recordings. After you continue, Android will ask you to allow microphone access.</string>
+    <string name="mic_denied_title">Microphone access was not allowed</string>
+    <string name="mic_denied_message">Without the microphone, voice commands cannot work. The camera keeps working. Select Try again, and in the Android window choose to allow microphone access.</string>
+    <string name="mic_blocked_title">Microphone access is turned off</string>
+    <string name="mic_blocked_message">Android will no longer ask for microphone access. Select Open settings, open Permissions, then Microphone, and allow access. Then return to KioskVision.</string>
+
+    <!-- Spoken by the app (rendered in the language of the available voice) -->
+    <string name="speak_direction_left">A bit left.</string>
+    <string name="speak_direction_right">Slightly right.</string>
+    <string name="speak_direction_up">Slightly up.</string>
+    <string name="speak_direction_down">A bit down.</string>
+    <string name="speak_direction_near">Slowly, you are close.</string>
+    <string name="speak_direction_on_target">Stop, you are at the button. You can press it.</string>
+    <string name="speak_hand_not_detected">I can\'t see your hand. Move your whole hand into view, closer to the kiosk screen than to the phone.</string>
+    <string name="speak_target_selected">Found %1$s. Bring your index finger to the screen.</string>
+    <string name="speak_target_selected_critical">Found %1$s. Before pressing, check the details: say, what is on the screen.</string>
+    <string name="speak_target_not_found">I couldn\'t find %1$s on the screen.</string>
+    <string name="speak_target_ambiguous">Which one: %1$s or %2$s?</string>
+    <string name="speak_screen_contents">On the screen: %1$s.</string>
+    <string name="speak_screen_some_unreadable">Some text could not be read reliably.</string>
+    <string name="speak_no_text_visible">I can\'t see any text. Point the camera at the screen.</string>
+    <string name="speak_ocr_not_ready">Text recognition is not ready.</string>
+    <string name="speak_screen_changed">The screen changed.</string>
+    <string name="speak_screen_out_of_focus">The screen is blurred. Change the camera angle slightly.</string>
+    <string name="speak_cannot_read_text">I cannot read the text. Move a little closer to the screen.</string>
+    <string name="speak_target_uncertain">Cannot point to the button right now.</string>
+    <string name="speak_target_position_lost">I have lost where the button is. Keep the kiosk screen in view.</string>
+    <string name="speak_reading_screen">Checking the screen.</string>
+    <string name="speak_hold_still">Let me see the screen for a moment.</string>
+    <string name="speak_guidance_stopped">Guidance stopped.</string>
+    <string name="speak_not_understood">I didn\'t understand. Try again.</string>
+    <string name="speak_recognition_no_speech">I didn\'t hear anything.</string>
+    <string name="speak_recognition_network">Speech recognition needs an internet connection.</string>
+    <string name="speak_recognition_language">Georgian speech recognition is not available on this device.</string>
+    <string name="speak_recognition_unavailable">Speech recognition is not available on this device.</string>
+    <string name="speak_recognition_permission">Microphone access is needed for voice commands.</string>
+    <string name="speak_recognition_failed">Speech recognition failed. Try again.</string>
 </resources>

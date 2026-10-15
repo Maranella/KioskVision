@@ -19,6 +19,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Tesseract4Android is only published on JitPack; restrict the repo to it.
+        maven {
+            url = uri("https://jitpack.io")
+            content { includeGroup("cz.adaptech.tesseract4android") }
+        }
     }
 }
 

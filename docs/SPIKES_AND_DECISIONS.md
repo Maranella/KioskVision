@@ -148,6 +148,473 @@ uses LiDAR + Vision to read labels under a user's finger. Different task
 sensor stack. No competitor product offering camera-guided fingertip-to-
 target navigation for blind users was identified in the research pass.
 
+
+### R-11 — OCR cost is driven by line count, and a region crop is ~13x cheaper
+
+**Type:** experimental result (measured in-session, 2026-10-14).
+
+**Device:** physical Android handset, model `A142` (`Pacman`), arm64-v8a,
+Android 15, debug build. Medians of 5 runs, via
+`OcrPerformanceTest` (`connectedDebugAndroidTest`).
+
+#### Latency vs input resolution — downscaling rejected
+
+Synthetic kiosk screen at the 576x1280 analysis frame size this device
+delivers:
+
+| Input | Latency | Buttons matched | Note |
+|---|---|---|---|
+| 576x1280 (1.00) | 232 ms | 4/4 @0.97 | |
+| 432x960 (0.75) | 197 ms | 4/4 @0.97 | |
+| 288x640 (0.50) | 160 ms | 4/4 @0.97 | small print destroyed (`'cam'@0.55`) |
+| 202x448 (0.35) | 63 ms | **2/4** | unusable |
+
+**Decision: do not downscale OCR input.** Halving the input saves ~30% and
+costs the small print, which is where amounts and terminal identifiers live
+(safety requirement 4). The 0.35 scale is fast but loses half the buttons.
+The gain does not justify the risk, especially next to the region result
+below.
+
+#### Latency vs area — region crops are the real win
+
+Cluttered frame (21 lines, approximating a real camera view with chrome and
+desk clutter), full frame = **442 ms**:
+
+| Region around the target | Area | Latency | Speedup | Target |
+|---|---|---|---|---|
+| pad 2.0 x box | 47% | 329 ms | 1.4x | **missed** |
+| pad 1.0 x box | 25% | 283 ms | 1.6x | found @0.97 |
+| **pad 0.5 x box** | **13%** | **34 ms** | **13.3x** | **found @0.97** |
+| pad 0.25 x box | 8% | 30 ms | 15.1x | found @0.97 |
+
+Cost tracks **line count**, not pixel count: the jump from 283 ms to 34 ms
+comes from dropping 5 candidate lines to 2, not from the 2x area change.
+
+`TessBaseAPI.setRectangle` reports boxes in **full-image coordinates**
+(verified: 0, 3 px from the drawn centre), so a region result needs no
+translation and drops straight into the same geometry as a full-frame one.
+No cropped bitmap copy is needed either.
+
+**Adopted:** `pad 0.5` for re-anchoring a locked target
+(`TargetTracker.ANCHOR_PAD`). `pad 1.0` was rejected despite still finding
+the label — it is barely faster than a full run.
+
+#### Hand tracking and contention
+
+| Condition | Per frame | FPS |
+|---|---|---|
+| Hand landmarks alone, 576x1280 | 55-63 ms | 16-18 |
+| With Tesseract looping beside it | 55-68 ms | 15-18 |
+
+**Contention is within run-to-run noise (±10%)** on this hardware; one run
+even measured the contended case as marginally faster. The OCR thread is
+pinned to `THREAD_PRIORITY_BACKGROUND`, which is the right default but
+**showed no measurable benefit** and should not be credited with one.
+
+This **does not explain** the 133-158 ms per frame (~6-7 fps) observed in
+the live app during the previous session. That was measured after minutes of
+sustained camera + OCR use, so thermal throttling is the leading hypothesis;
+it is **unconfirmed** and should be re-measured on a warm device.
+
+#### Full-frame OCR on real camera frames
+
+The synthetic figures above understate the problem. Measured in the live app
+with the rear camera pointed at a TBC Pay screen on an external display
+(21-22 recognised lines, including the host machine's window chrome):
+
+| Source | Full-frame OCR |
+|---|---|
+| Synthetic cluttered frame (21 lines) | 442 ms |
+| **Real camera frame (20-22 lines)** | **2.6 s - 6.3 s** |
+
+Real frames carry sensor noise, uneven illumination and compression-free but
+soft edges, all of which multiply Tesseract's per-line work. 6314 ms was the
+worst single run observed. This is the strongest argument for the region
+path: the same device re-anchors a locked target in ~34 ms.
+
+#### End-to-end effect
+
+Over the full eight-step scenario (`LiveAssistScenarioTest`): **10 full OCR
+runs and 40 region runs**, full frame 157 ms, region 16 ms, hand 65 ms. In
+the live app pointed at an unreadable scene, full OCR runs dropped from 42 in
+a comparable interval to **3**, after which the phase settles on
+`ScreenReady` instead of looping through false transitions.
+
+
+
+### R-12 — Motion blur collapses Tesseract confidence on correctly read text
+
+**Type:** experimental result (measured in-session, 2026-10-14).
+
+**Device:** `A142`, arm64-v8a, Android 15. `OcrMotionDiagnosticTest`, real
+Tesseract `kat+eng` over a rendered kiosk screen transformed to simulate
+handheld movement.
+
+The reported symptom was that slight phone movement makes the app announce
+it cannot find `გადახდა` while the label is plainly visible. The cause is
+**not** geometry:
+
+| Simulated movement | OCR output | Confidence | Matcher |
+|---|---|---|---|
+| still | `გადახდა` | 0.97 | found |
+| translate 10-40 px | `გადახდა` | 0.97 | found |
+| translate 40 px + 25 px down | `გადახდა` | 0.97 | found |
+| rotate 1-3 deg | `გადახდა` | 0.97 | found |
+| rotate 6 deg | `\| გადახდა I\| სალა \|` | 0.39 | rejected (lines merged) |
+| **motion blur 4 px** | **`გადახდა` — exactly right** | **0.20** | **rejected** |
+| motion blur 8 px | `გადახდა = ბალანსი` | 0.20 | rejected |
+| **motion blur 14 px** | **`გადახდა.` — right** | **0.47** | **rejected** |
+| translate + rotate + blur | label gone, only the heading survives | - | rejected |
+
+**Translation up to 40 px and rotation up to 3 deg cost nothing**: the label
+still comes back at 0.97. So perspective rectification of the kiosk display
+would not have addressed this symptom, and was not implemented on the
+strength of these numbers.
+
+**Tesseract's per-word confidence is not a measure of correctness under
+blur.** At 4 px of blur it returned the target string *exactly* and scored it
+0.20. The old matcher applied a single-frame gate of 0.60, so a perfectly
+correct reading was discarded and the user was told the button does not
+exist.
+
+**Decision: corroboration across runs, not a lower threshold.** Lowering the
+gate would accept single-frame garbage, which safety requirement 1 forbids.
+Instead a label may be accepted below the single-frame gate only when the
+same text was read at the same place in **two or more** recent OCR runs.
+Identical misreadings do not repeat at the same position; correct readings
+do. The high-confidence single-frame path is unchanged.
+
+Severely blurred frames are now skipped before OCR rather than spending
+270-325 ms producing text that will be thrown away.
+
+#### Measured effect of the fix
+
+`OcrMotionDiagnosticTest`, 12 trials per band, each trial three frames with
+randomised drift (±10 px), tilt (±1.5 deg) and blur, on the same device:
+
+| Handheld condition | Old single-frame gate | Corroborated across runs |
+|---|---|---|
+| Steady (blur ≤ 2 px) | 12/12 (100%) | 12/12 (100%) |
+| Light movement (blur ≤ 6 px) | 10/12 (83%) | **12/12 (100%)** |
+| Heavy movement (blur ≤ 12 px) | 7/12 (58%) | **9/12 (75%)** |
+
+Unchanged when the phone is steady, which is the check that this is not just
+a loosened threshold. OCR cost was 164-198 ms per run throughout.
+
+Worked example against real Tesseract, three handheld frames at a fixed blur:
+
+| Blur | Run 1 | Run 2 | Run 3 | Outcome |
+|---|---|---|---|---|
+| 4 px | `გადახდა` 0.20 x1 | `\| გადახდა` 0.96 x2 | x2 | **found** |
+| 8 px | `გადახდა = ბალანსი` 0.20 x1 | `გადახდა` 0.80 x1 | x2 | **found** |
+| 14 px | `გადახდა.` 0.47 x1 | `გადავიდა` 0.21 x1 | garbage | not found |
+
+At 14 px the label is genuinely unreadable — run 2 returned a different word.
+The app now answers that case by asking the user to hold the phone still,
+not by claiming the button is absent.
+
+#### What was deliberately not done
+
+Perspective rectification of the kiosk display was **not** implemented. The
+measurements above show translation up to 40 px and rotation up to 3 deg cost
+nothing at all, so a homography would not have addressed the reported fault.
+Rotation beyond ~6 deg does degrade OCR (text lines merge), which remains an
+open limitation rather than a fixed one.
+
+
+
+### R-13 — MediaPipe needs most of the hand in frame, not just a fingertip
+
+**Type:** experimental result (measured in-session, 2026-10-14).
+
+**Device:** Samsung SM-S731B, Android 16. `HandVisibilityTest`, real
+MediaPipe HandLandmarker over a 576x1280 frame.
+
+The live app reported "no hand in frame" continuously while the user
+believed their finger was in shot. Measured limits:
+
+| Hand size in frame | Detected |
+|---|---|
+| 143 px wide (25% of frame width) | **no** |
+| 251 px (44%) | yes |
+| 358-1146 px (62-199%) | yes |
+
+| Portion of the hand inside the frame | Detected |
+|---|---|
+| ~100% | yes |
+| ~93% | yes |
+| ~50% | **no** |
+| ~7% | **no** |
+
+So the hand must be **mostly inside the frame** and at least roughly
+**40% of the frame width**. A fingertip entering from the edge with the palm
+outside is not tracked at all, and neither is a hand too far away. A hand
+larger than the frame is fine.
+
+One caveat: the landmarker runs in VIDEO mode, which tracks across frames, so
+an abrupt jump in hand position can miss for a frame or two. One case at
+~100% visibility missed for that reason.
+
+**Consequence:** this is a framing problem, not a threshold problem, so the
+detection confidences were left alone. The spoken message was changed from
+"I can't see your finger" to one that says what to change — bring the whole
+hand into view, nearer the kiosk than the phone.
+
+
+
+### R-14 — Georgian OCR confuses specific letter pairs, and kiosk wording varies
+
+**Type:** experimental result (observed on device, 2026-10-14).
+
+**Device:** Samsung SM-S731B. Captured from the live app's match log against a
+real TBC Pay menu.
+
+What Tesseract returned for a screen whose true labels are known:
+
+| On screen | OCR read | Confusion |
+|---|---|---|
+| ბალანსის შემოწმება | ბაღანსის შემონშება | `ლ`→`ღ`, `წ`→`ნ`, `მ`→`შ` |
+| მობილურის შევსება | მობიღურის შევსება | `ლ`→`ღ` |
+| კომუნალური მომსახურება | კომუნაღური მომსახურება | `ლ`→`ღ` |
+| დახმარება | დასმარება | `ხ`→`ს` |
+
+`ლ`→`ღ` appeared in three independent labels, so it is systematic rather than
+noise. These are visually similar glyphs.
+
+**Fix:** matching now uses an OCR-aware edit distance. A substitution within a
+known confusable pair (`ლ`/`ღ`, `ხ`/`ს`, `წ`/`ნ`, `მ`/`შ`) costs 0.4 of an
+edit instead of 1, and such a letter still counts towards the stem prefix. The
+cost is deliberately non-zero — these remain errors, and two of them should
+weigh about as much as one real difference. A test asserts that a confusable
+substitution scores higher than a non-confusable one, so the allowance cannot
+quietly become "any letter matches any other".
+
+**Second finding, unrelated to OCR quality:** this screen has no literal
+`გადახდა` button at all. Its payments option is worded
+`და სხვა გადასახადები`. A user asking to pay was told the button does not
+exist, correctly by the matcher's own rules but uselessly. `გადასახად` was
+added to the payment concept stems. An exact `გადახდა` label still outranks
+the generic one where both are present, and the payments concept remains
+flagged critical so the user is still prompted to check details.
+
+
+
+### R-15 — The gyroscope was being used as a proxy for things already measured
+
+**Type:** design defect found from user feedback, 2026-10-14.
+
+The user reported that being told to hold the phone still is "very hard" —
+which it is, while reaching for a kiosk with the other hand.
+
+Four places treated "the gyroscope reports movement" as disqualifying:
+
+| Place | Old behaviour |
+|---|---|
+| `DirectionalGuidanceEngine` | `!deviceSteady` returned `TARGET_UNCERTAIN` — all guidance stopped |
+| `TargetTracker.onDeviceMoved` | discarded the measured target position outright |
+| `LiveAssistPipeline.imageUnreliable` | a moving phone deferred target selection |
+| acquisition scheduling | OCR waited for a steady frame |
+
+In each case the gyroscope stood in for something the app **already measures
+directly**: whether the target's position is still current (anchor age) and
+whether the image is readable (sharpness). The proxy is strictly worse than
+the measurement, and far more pessimistic — a phone can move continuously
+while both the anchor and the image stay perfectly good.
+
+**Change:** movement no longer blocks anything. It shortens how long a
+measured position is trusted, from `MAX_ANCHOR_AGE_MS` (4 s) to
+`MOVING_ANCHOR_AGE_MS` (1.2 s), and shortens the region re-anchor interval
+from 400 ms to 250 ms so that window is comfortably met. Region re-anchoring
+costs a few milliseconds (R-11), which is what makes this affordable.
+Acquisition and selection now judge the image on sharpness alone, and the
+target position is never discarded for movement.
+
+Safety is unchanged in kind: guidance still stops when the mapping is not
+trustworthy — it is just decided by the measurement rather than by a proxy.
+`GuidanceTest` still asserts that a stale anchor never yields `ON_TARGET`.
+
+Wording that demanded stillness was replaced by wording that says what the
+app needs, e.g. `ეკრანი კადრში დატოვე` and
+`ეკრანი ბუნდოვანია, ოდნავ შეცვალე კამერის კუთხე`.
+
+**Measured.** `HandheldMotionExperimentTest`, 30 trials on a Samsung
+SM-S731B, driving the real pipeline (real Tesseract, real MediaPipe) with
+frames that drift up to 14 px, tilt up to 1.5 deg and blur up to 5 px on
+**every** frame, for 9 s of continuous movement per trial. Criteria were
+fixed before the run.
+
+| Metric | Criterion | Measured (3 runs) |
+|---|---|---|
+| Screen acquired while moving | — | 30/30, 30/30, 30/30 |
+| Target retained through motion | 100% | 30/30, 29/30, 30/30 |
+| Guidance available | >= 80% | **77%, 83%, 86%** |
+| *Same frames, old steady-required rule* | — | **0%, 0%, 0%** |
+| Direction reversals | <= 1 per trial | 0.00 every run |
+| False target-reached | 0 | 0 every run |
+| First cue after selection | — | 219 ms, 233 ms |
+
+Reported as a range rather than a best run: availability straddles the 80%
+criterion and retention lost one target in one run of three. Neither figure
+should be quoted as a single number.
+
+The comparison is the result: under continuous handheld movement the previous
+rule allowed guidance on **no frames at all**, which is exactly the reported
+experience of being told to hold still. It is now available on roughly three
+frames in four.
+
+**The 80% target is only sometimes met, and was deliberately not tuned to.** Availability
+here is bounded by a safety rule rather than by conservatism: at handheld
+speeds (~210 px/s in these trials) a position not re-anchored for
+`MOVING_ANCHOR_AGE_MS` (1.2 s) can be ~250 px stale, far more than the
+on-target zone. Raising that limit would lift the number by guiding towards
+where the button no longer is, so it was left alone. The honest way to close
+the gap is to make re-anchoring succeed more often under blur, not to trust
+stale geometry for longer.
+
+The suite therefore asserts floors — 60% availability, 95% retention, both
+far above any regression — and reports the 80%/100% aspirations separately,
+so a regression is caught without the figures being quietly redefined to
+whatever was achieved.
+
+**Two measurement bugs were found and fixed before these numbers were
+trusted:** the harness had no backpressure, so its frame queue grew across
+trials until later trials read stale state (CameraX applies
+`KEEP_ONLY_LATEST`; the harness now waits for each frame to drain); and cue
+latency was timestamped while tallying the run rather than as frames arrived,
+which simply reproduced the window length — 4048 ms with a 4 s window, 9050 ms
+with a 9 s one. Corrected, it is 219 ms.
+
+
+### R-16 — Tesseract configuration sweep: upscaling wins, a bigger model does not
+
+**Type:** experimental result (measured in-session, 2026-10-15).
+
+**Device:** Samsung SM-S731B. `GeorgianOcrAccuracyTest`, 96 ground-truth
+labels per configuration over three rendered kiosk screens in six conditions
+(34/16/12 px text, faint contrast, 10 px blur, small+blur), with luminance
+noise added.
+
+**Corpus caveat:** rendered, not photographed. It has no glare, no real
+optics and no kiosk fonts. These numbers rank configurations against each
+other; they are **not** an estimate of field accuracy.
+
+| Configuration | CER | WER | Exact labels | p50 |
+|---|---|---|---|---|
+| `fast` + `PSM_SPARSE_TEXT` + 1x (shipped) | 29.7% | 42.9% | 52.1% | 69 ms |
+| **`fast` + `PSM_SPARSE_TEXT` + 2x** | **27.4%** | **33.3%** | **66.7%** | 158 ms |
+| `fast` + sparse + 2x + grayscale | 27.2% | 33.3% | 66.7% | 164 ms |
+| `fast` + `PSM_AUTO` + 1x | 34.2% | 41.1% | 55.2% | 60 ms |
+| `best` + sparse + 1x | 29.2% | 42.9% | 52.1% | 78 ms |
+| `best` + sparse + 2x | 27.1% | 33.3% | 66.7% | 202 ms |
+
+Four conclusions, three of them negative:
+
+1. **`tessdata_best` is not worth adopting for Georgian.** 29.2% against
+   29.7% CER is inside the noise, and it costs ~2 MB of APK and 10-30% more
+   latency. The shipped `tessdata_fast` model stays.
+2. **`PSM_AUTO` is worse than `PSM_SPARSE_TEXT`** (34.2% vs 29.7%), and
+   collapses under blur (100% vs 88% CER). The existing choice was right.
+3. **Grayscale conversion buys nothing** (27.2% vs 27.4%). Not adopted.
+4. **2x upscaling is the one real win**: exact label recognition 52.1% ->
+   66.7%. The gain is entirely in small text — 12 px CER falls 5% -> 0%,
+   16 px 1% -> 0% — and there is nothing to gain at 34 px, which already
+   reads at 0%.
+
+**Adopted:** upscaling applied where it pays — always on a re-anchor region
+(small enough that the cost is slight) and on a full frame only when the
+median label height on that screen is under
+`SMALL_TEXT_FRACTION` (0.015 of frame height, ~19 px at 1280).
+
+An initial threshold of 0.03 (~38 px) upscaled comfortably-sized text and
+slowed acquisition enough that the end-to-end scenario stopped acquiring
+altogether — caught by the regression suite, not by inspection.
+
+Coordinates are verified rather than assumed: a label drawn at (200, 640) is
+recovered at (200, 641) through both the full-frame and the crop-then-enlarge
+path (`upscalingPreservesCoordinates`).
+
+**Blur remains the dominant error source** by a wide margin: 84-88% CER under
+10 px blur against 0-5% otherwise. No configuration mitigates it, which is
+why the pipeline skips soft frames rather than trying to read them.
+
+**Motion tolerance did not regress** (30 trials, after the change): retention
+30/30, guidance available 85%, 0 reversals, 0 false target-reached, first cue
+206 ms.
+
+
+
+### R-17 — The motion-availability metric is confounded by the harness's own occlusion
+
+**Type:** investigation, 2026-10-15. Resolved.
+
+Synthetic guidance availability appeared to fall from 77-86% to 52-66%. It had
+not: the metric was mixing two different situations. The cause was not found
+where it was first looked for.
+
+#### What was ruled out, each by a controlled A/B on identical inputs
+
+| Variable | Arms | Availability | Anchor refresh |
+|---|---|---|---|
+| Region upscaling | 2x / 1x | 66% / 59% | 33% / 30% |
+| Trial reset | full / stop-only | 66% / 55% | 30% / 30% |
+| Anchor padding | 0.5 / 1.0 / 2.0 | 66% / 52% / 47% | 33% / 30% / 37% |
+| Device state | after reboot, cooled to 36.6 C | 61-66% | 30% |
+
+Pipeline timings stayed normal throughout — hand 45-60 ms, region OCR
+16-53 ms, full OCR 109-136 ms — so thermal throttling is **not** supported.
+The `GuidanceUnavailable` split was verified equivalent by inspection: the
+same predicate, reordered only to report which branch fired.
+
+None of these restored 77-86%, and **none explains the drop**.
+
+#### Two real defects found on the way, both fixed
+
+1. **The diagnostics were blind.** `unreadableRuns` is incremented only in the
+   full-frame path; region results return before it. A log reading
+   `unreadableRuns=0 anchorJobs=42` therefore said nothing about whether
+   those 42 jobs succeeded. Region outcomes are now counted separately
+   (`refreshed` / `notSeen`), which is what made the rest of this measurable.
+2. **Trials were not independent.** `Stop` clears the target but leaves
+   `snapshot` and `recentRuns` in place, and the experiment reuses one
+   pipeline, so every trial inherited the previous trial's recognised screen.
+   `resetForTest` now clears it.
+
+#### Resolution: the metric was confounded, the product was not broken
+
+Anchor refresh sat at 30-37% in *every* arm (1,761 attempts in the largest
+sample). That constancy, under changes to region size, magnification, reset
+and device state, pointed at the **input** rather than the geometry — and
+splitting availability by whether the hand covered the label confirmed it:
+
+| Condition | Guidance available | n |
+|---|---|---|
+| **Label visible** | **86%** | 1297, replicated 86% at n=1153 |
+| Label covered by the hand | 27-32% | 935-1175 |
+
+The blended figure is just the weighted mix of the two
+(0.58 x 86 + 0.42 x 32 = 63). When the app can see the label it guides 86% of
+the time — at the top of the original 77-86% range. **There was no product
+regression.** What moved was how much of each reach the rendered hand spent
+over the button, which shifted with frame pacing when per-frame measurement
+work was added.
+
+Guidance pausing while the label is covered is correct: the position cannot be
+confirmed, and the alternative is guiding from stale coordinates.
+
+**The gate now asserts availability over unoccluded frames only** (target 80%,
+measured 86%), and reports the blended and occluded figures alongside. This
+split was predicted and agreed *before* the run that produced these numbers,
+not chosen afterwards to make the gate pass, and no safety limit was changed:
+retention 30/30, zero direction reversals, zero false target-reached, first
+cue 187 ms.
+
+#### What this cost, and the lesson
+
+Four controlled A/Bs came back negative before the question was reframed. The
+metric had been defined without asking what it would measure when the user's
+own hand — the thing the app exists to guide — sits on top of the target.
+
+
 ---
 
 ## Architecture Decision Records

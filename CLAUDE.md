@@ -37,7 +37,7 @@ The project will not move to Phase 1 (first spike) until the user approves it.
 The product is built natively for both platforms (ADR-008):
 
 - `android/` — Android app: Kotlin, Jetpack Compose, CameraX, Gradle.
-  Package `com.cellfie.kioskvision`.
+  Package `com.maranella.kioskvision`.
 - `ios/` — iOS app: Swift, Xcode project (not created yet).
 
 Documentation in `docs/` is shared. Where a doc names an Apple framework,
