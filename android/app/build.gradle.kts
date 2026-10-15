@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -58,6 +59,16 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.mediapipe.tasks.vision)
     implementation(libs.tesseract4android)
+
+    // Firebase AI Logic, for the Gemini Live voice spike. Versions come from the BoM, as the
+    // official get-started guide specifies. Analytics is deliberately not included: it is
+    // optional here and pulls play-services-measurement, which ships Kotlin 2.4.0 metadata
+    // that this project's Kotlin 2.2.10 compiler rejects.
+    implementation(platform("com.google.firebase:firebase-bom:35.0.1"))
+    implementation("com.google.firebase:firebase-ai")
+    // Debug-only App Check provider; a release build must use Play Integrity instead.
+    debugImplementation("com.google.firebase:firebase-appcheck-debug")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

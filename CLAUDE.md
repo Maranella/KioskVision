@@ -4,22 +4,46 @@ Persistent instructions for Claude Code sessions on this repository.
 
 ## Product summary
 
-A native iOS application (working title: **Voice-Guided Kiosk Assistant**) for
+A native application (working title: **Voice-Guided Kiosk Assistant**) for
 blind and visually impaired users in Georgia who need to operate physical
-touchscreen kiosks and payment terminals (TBC Pay and selected others).
+touchscreen kiosks and payment terminals (TBC Pay and selected others). It is
+built for Android and iOS (ADR-008); Android is where the code currently is.
 
-The app uses the iPhone camera to understand the kiosk screen, listens to the
+The app uses the device camera to understand the kiosk screen, listens to the
 user's spoken Georgian requests, and provides spoken Georgian instructions that
 help the user physically press the intended control. The user always performs
 the final press themselves. The app never autonomously executes a transaction.
 
 ## Current development phase
 
-**Phase 0 — Initialization and research.**
-No application code exists yet. The repository currently contains only
-documentation and the results of initial technical investigation.
+**Android implementation, with the core feasibility question still open.**
 
-The project will not move to Phase 1 (first spike) until the user approves it.
+The Android app exists and is substantial: ~5,800 lines of Kotlin under
+`android/`, 130 unit tests and 15 instrumented tests, all passing. It covers
+camera capture with focus lock, Georgian OCR (Tesseract), hand landmarks
+(MediaPipe), persistent target tracking, directional guidance, Georgian spoken
+commands, and a Gemini Live voice spike.
+
+**What that does not mean.** No milestone in `MVP_AND_ACCEPTANCE_CRITERIA.md`
+has passed its acceptance criteria. Every measurement so far comes from
+rendered frames, synthetic harnesses or a desk-side camera session. Nobody has
+yet pointed this app at a real kiosk, and the central interaction — a blind
+user's finger guided to a real button by spoken Georgian — has never been
+performed end to end.
+
+Two gaps are structural rather than unfinished work, and are recorded in
+`SPIKES_AND_DECISIONS.md`:
+
+- **No kiosk-screen detection.** `camera/FrameGeometry.kt` approximates the
+  screen by the whole camera frame, with no quadrilateral detection and no
+  perspective correction. Product milestone M1 cannot pass without it.
+- **Fingertip guidance may not be reachable on this hardware.** MediaPipe
+  needs most of the hand in frame (R-13) while reading a 2 cm label needs the
+  phone close, and Android has no depth sensor to resolve the parallax (R-07).
+
+Treat phase claims with suspicion and check the code before repeating them —
+this section itself said "no application code exists yet" for two milestones
+after the code existed.
 
 ## Primary documents (read before acting)
 
@@ -38,7 +62,9 @@ The product is built natively for both platforms (ADR-008):
 
 - `android/` — Android app: Kotlin, Jetpack Compose, CameraX, Gradle.
   Package `com.maranella.kioskvision`.
-- `ios/` — iOS app: Swift, Xcode project (not created yet).
+- `ios/` — iOS app: Swift. **Not created.** The directory does not exist; all
+  iOS-specific findings in `docs/` (R-01-R-03, R-09, ADR-001) remain untested
+  intentions. Do not create or modify iOS code unless explicitly asked.
 
 Documentation in `docs/` is shared. Where a doc names an Apple framework,
 check whether an Android equivalent has been measured before assuming it.
@@ -114,7 +140,11 @@ Do **not** attempt to implement:
 - Always-on custom wake-word listening.
 - Account systems or personalization.
 - Backend services, databases, DI containers, or third-party AI providers that
-  are not required by the current milestone.
+  are not required by the current milestone. **Approved exception:** Firebase
+  AI Logic / Gemini Live, for the Georgian voice work described in
+  `docs/TOUCHGUIDE_ANDROID_AI_INTEGRATION_SPEC.md`. It is scoped to voice:
+  camera frames, OCR text and screen geometry must not be sent to it
+  (ADR-009).
 - A full test suite before there is production code to test.
 
 When in doubt, ask. The goal of this project is not maximum code output. The

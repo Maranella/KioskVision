@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Debug-only M1 spike. It exists to measure Georgian Live-API behaviour on a real
+             phone and touches no camera, OCR or guidance code.
+
+             It carries its own LAUNCHER entry so the measurement can be run by hand, without
+             adb, by whoever is doing the speaking. That icon is why this file is under
+             src/debug: the manifest merger never applies it to a release build, so the spike
+             cannot reach a shipped app even by mistake. -->
+        <activity
+            android:name=".voice.VoiceSpikeActivity"
+            android:exported="true"
+            android:label="Voice spike (debug)">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

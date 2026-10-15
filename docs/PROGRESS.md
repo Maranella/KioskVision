@@ -1,8 +1,13 @@
 # Progress
 
-**Current phase.** Phase 0 — Initialization and research.
+**Current phase.** Android implementation. No milestone in
+`MVP_AND_ACCEPTANCE_CRITERIA.md` has passed its acceptance criteria yet.
 
-**Date of last update.** 2026-10-14.
+**Date of last update.** 2026-10-16.
+
+**Scale.** ~5,800 lines of Kotlin under `android/`; 130 unit tests and 15
+instrumented tests, all passing. Measurements recorded as R-11 through R-20.
+Last commit `e509c1b`; the voice work below is in the working tree, uncommitted.
 
 ## Completed
 
@@ -49,8 +54,37 @@
     of being told the button does not exist;
   - autofocus is pointed at the kiosk screen once and held.
 
-  Tests: **105 unit** plus **4 instrumented classes** on a physical device.
-  Measurements recorded as R-11 and R-12.
+  Tests: **130 unit** plus **15 instrumented** on a physical device
+  (Samsung SM-S731B, Android 16, serial `R5GL75BE33T`).
+  Measurements recorded as R-11 through R-17.
+
+- **Georgian voice via Gemini Live** (`android/`, 2026-10-16, uncommitted).
+  A debug-only spike (`VoiceSpikeActivity`, its own launcher icon in debug
+  builds) measuring whether Gemini Live can carry a Georgian session:
+  - `gemini-3.8-live` adopted after the 2.5-generation identifiers in the
+    official sample were rejected by the server as retired, and
+    `gemini-3.1-flash-live-preview` failed input language detection (R-18);
+  - the model's own voice was re-entering the microphone and being
+    transcribed as the user, which produced self-greeting loops; fixed with
+    `VOICE_COMMUNICATION` capture and playback routing. **Barge-in is
+    currently disabled** as a diagnostic measure and must be restored (R-18);
+  - a Georgian kiosk vocabulary is supplied in the system instruction, the
+    only lever the SDK exposes over input interpretation. It corrected
+    "tenisi" to "deni" and did **not** cause false positives on an
+    off-domain probe (R-19);
+  - `inputAudioTranscription` is a separate, unreliable channel - it returns
+    Latin transliteration and, at times, Spanish, German, Turkish or
+    Devanagari, while the model's comprehension stays correct. **Evaluation
+    must score responses, not transcripts** (R-19, R-20).
+
+  **A safety defect was found and fixed here (R-20).** Asked for forty lari,
+  the assistant announced that forty lari had been received, with no kiosk
+  present. It had adopted the role of the machine and invented a transaction.
+  Two rounds of prompt hardening stopped it and left the assistant reflecting
+  the user's words back, useless. That trade-off is why **ADR-009** proposes
+  the structural fix: deny the voice layer any screen data, keep every screen
+  claim inside the closed `SpokenMessage` vocabulary, and arbitrate the two
+  audio sources. ADR-009 is **proposed, not built**.
 
 ## Verified results (what we actually know as fact right now)
 
@@ -65,7 +99,9 @@
   quality on our targets is **unverified**.
 
 - Live assist — **the full scenario is verified on a physical device
-  (handset `A142`) through rendered frames, not through the camera.**
+  through rendered frames, not through the camera.** (Originally run on
+  handset `A142`, which is no longer available; the current device is
+  Samsung SM-S731B.)
   `LiveAssistScenarioTest` drives the real pipeline with real Tesseract and
   real MediaPipe and passes all eight steps: acquisition, selecting
   `გადახდა`, the target surviving its label being covered by a hand,
@@ -94,13 +130,13 @@
   performed in any of them. The rendered-frame harness covers the logic but
   has no lens, no depth and no microphone.
 
-- Android foundation — **verified on the Android emulator only**
-  (2026-10-14): debug build, 9 JVM unit tests, permission grant / deny /
-  permanent deny / Settings recovery / revoke-in-background, camera
-  released on Home and a single camera client after return and rotation.
-- **Not yet verified on Android:** a physical device, TalkBack speech
-  (including whether a Georgian TTS voice is available), voice-assistant
-  launch, real camera error paths.
+- Android foundation — originally verified on the emulator (2026-10-14);
+  the pipeline, OCR and hand tracking have since been exercised on the
+  physical Samsung SM-S731B.
+- **Still not verified on Android:** TalkBack end to end (including whether a
+  Georgian TTS voice is installed on the device), voice-assistant launch, real
+  camera error paths. A blind user has to be able to open and operate *the
+  app* before any of the kiosk work matters, and that path is untested.
 
 ## Hypotheses to validate (not yet verified)
 
@@ -116,10 +152,16 @@
 
 ## Blockers
 
-- **Access to a target kiosk.** Spike-04 and later milestones need
-  physical access to a TBC Pay kiosk for capture and testing. Scheduling
-  and (ideally) a non-public test environment are needed. Not an
-  engineering blocker yet, but will become one before Phase 7.
+- **Access to a target kiosk. This is now the active blocker, not a future
+  one.** Every measurement in this file comes from rendered frames, synthetic
+  harnesses or a desk-side camera session; the app has never been pointed at a
+  kiosk. The capture tooling is written and idle. Scheduling and, ideally, a
+  non-public test environment are needed.
+- **A person to hold the phone.** The interaction at the centre of the product
+  - a finger moving in the camera view while spoken Georgian directions guide
+  it - has never been performed. Four recording windows were offered and none
+  was used. No harness substitutes for this: it has no lens, no depth and no
+  microphone.
 - **Native Georgian testers.** Spikes 02 and 03 require 2–3 native
   Georgian speakers (blind participants preferred for Spike-03).
 
@@ -128,21 +170,82 @@
 See `PRODUCT_SPEC.md §7`. The ones most likely to affect near-term work:
 
 - U-06 — Confirming iPhone Pro / LiDAR as the baseline device (ADR-001
-  proposed, awaiting Spike-01).
+  proposed, awaiting Spike-01). **Pressing**: the code is Android-only and
+  Android has no depth sensor, so ADR-001's premise does not hold for the
+  platform actually being built.
 - U-08 — Which kiosk is the second supported model, if any, in V1.
+- **Privacy: the INTERNET permission.** It had been deliberately removed so
+  that camera frames and screen text could not leave the device. The Gemini
+  Live work restored it, and voice audio now streams to Google; camera frames,
+  OCR text and geometry remain local. This trade-off has been raised with the
+  product owner and **is not yet signed off**. See `SAFETY_AND_PRIVACY.md`.
+- **`android/app/google-services.json`** is untracked and not in
+  `.gitignore`. Whether it is committed needs a decision.
+
+## What stands between here and a usable product
+
+Grouped by what kind of problem each one is, because they are not
+interchangeable and the third kind can invalidate work on the first.
+
+### Engineering - known how, not done
+
+- **Kiosk-screen detection.** `camera/FrameGeometry.kt` treats the whole
+  camera frame as the screen: no quadrilateral detection, no homography, no
+  perspective correction. Product M1's framing diagnoses (`OFF_FRAME`,
+  `PARTIAL`, `TOO_FAR`, `OFF_ANGLE`, `GLARE`) do not exist, and every target
+  coordinate downstream is frame-relative, so it is wrong whenever the phone
+  is not square-on to the screen. Largest software gap.
+- **ADR-009** - proposed, unbuilt. Barge-in stays off until it is.
+- **Session rollover.** Live sessions end at ~10 min of connection and ~15 min
+  total; a real transaction can outlast that. Not implemented.
+- **Goal retention across screens** (M5) and **critical-detail readback with
+  explicit confirmation** (M6). These *are* "complete an operation
+  independently", and neither exists.
+
+### Unknown risk - needs measurement before it can be designed around
+
+- **No real kiosk data at all.** Acceptance criteria call for 20 recorded
+  clips and 30 spoken cases. Current totals: 0 clips, ~13 utterances from one
+  speaker. `tools/ocr-eval.sh`, `RealKioskEvaluationTest` and
+  `docs/DISTANCE_PROTOCOL.md` are built and waiting on kiosk access.
+- **Abstention rate.** The safety invariants require abstaining under
+  uncertainty, and nobody knows how often that fires at a real kiosk. An app
+  that abstains every third attempt is safe and unusable, and no measurement
+  distinguishes those two outcomes today.
+- **The app's own accessibility.** TalkBack end to end is untested, including
+  whether a Georgian TTS voice is present on the device.
+
+### Possibly not solvable on this hardware
+
+- **R-13 and R-07 together.** MediaPipe needs most of the hand in frame and
+  roughly 40% of frame width; a fingertip alone is never detected. Reading a
+  2 cm label needs the phone close. Seeing the whole hand needs it far. And
+  with no depth sensor on Android, finger-to-button distance is not
+  observable when the two are at different depths. "Your finger is 3 cm left
+  of the button" may not be computable on this device at all.
+
+  No amount of code closes this. The honest resolutions are a hardware change
+  or a product change - for example guiding by screen region ("lower right
+  quarter") rather than by fingertip.
 
 ## The single recommended next task
 
-**Run Spike-01 (finger-guidance feasibility experiment).**
+**Capture the real-kiosk dataset: ~30 annotated photos and short clips at a
+TBC Pay kiosk, following `docs/DISTANCE_PROTOCOL.md`.**
 
-This is the highest-risk assumption in the entire product. All downstream
-milestones that depend on finger guidance (M2, M5, M6) are gated by its
-outcome. The experiment is cheap (2–4 engineer-days), scoped to a tablet-
-as-fake-kiosk setup (no real kiosk access required), and produces a clear
-go/no-go signal.
+Not because it is the biggest piece of work, but because it is the cheapest
+thing that can invalidate the others. The third category above is unmeasured,
+and every week spent on kiosk-screen detection or ADR-009 is a week that may
+be spent building on a geometry the hardware cannot support. The tooling is
+already written; this task needs physical kiosk access, not engineering.
 
-Approval required before starting. See `ROADMAP.md` Phase 1 for the full
-deliverable and acceptance criteria.
+Spike-01 (finger-guidance feasibility, `ROADMAP.md` Phase 1) remains the
+formal gate for that question and is still unexecuted. Its reproduction steps
+below were written for iOS and LiDAR; there is no `ios/` directory, so on
+Android the depth method (Method B) has no equivalent and the spike needs
+rewriting before it can be run here.
+
+Approval required before starting.
 
 ## Exact steps to reproduce the Spike-01 setup when approved
 

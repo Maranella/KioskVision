@@ -19,16 +19,19 @@
     <!-- Requested only when the user first presses "Voice command". -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- MediaPipe's transitive usage-logging transport (com.google.android.datatransport) adds
-         these. KioskVision needs no network: OCR and hand tracking run on-device, and speech
-         recognition/TTS run in their own system apps. Removing them guarantees camera frames
-         and screen text cannot leave the device from this app. -->
-    <uses-permission
-        android:name="android.permission.INTERNET"
-        tools:node="remove" />
-    <uses-permission
-        android:name="android.permission.ACCESS_NETWORK_STATE"
-        tools:node="remove" />
+    <!-- Network access.
+
+         These were previously removed with tools:node="remove", so that the app was physically
+         incapable of sending anything off the device. That guarantee ends here: the Gemini Live
+         voice session streams microphone audio to Google. It is a real change in what this app
+         can do with user data, not a build detail.
+
+         What still never leaves the device: camera frames, OCR text, fingertip geometry and all
+         guidance. Those stay local by design, and the Live API's 1 FPS video path is useless for
+         fingertip tracking anyway. Only voice audio is streamed, only during an active session
+         the user started, and only after consent. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- Android 11+ package visibility: needed to find the speech recognizer and TTS engines. -->
     <queries>
@@ -41,6 +44,7 @@
     </queries>
 
     <application
+        android:name=".KioskVisionApp"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
