@@ -70,6 +70,7 @@
     <string name="speak_cannot_read_text">ტექსტს ვერ ვკითხულობ. ცოტა მიუახლოვდი ეკრანს.</string>
     <string name="speak_target_uncertain">ღილაკისკენ მითითება ახლა ვერ ხერხდება.</string>
     <string name="speak_target_position_lost">ღილაკის ადგილი დავკარგე. ეკრანი კადრში დატოვე.</string>
+    <string name="speak_screen_not_tracked">კიოსკის ეკრანს ვერ ვარჩევ. ტელეფონი ეკრანისკენ მიმართე.</string>
     <string name="speak_reading_screen">ეკრანს ვამოწმებ.</string>
     <string name="speak_hold_still">ეკრანი ერთი წამით დამანახე.</string>
     <string name="speak_guidance_stopped">მიმართულება შეჩერდა.</string>
@@ -80,4 +81,10 @@
     <string name="speak_recognition_unavailable">მეტყველების ამოცნობა ამ მოწყობილობაზე მიუწვდომელია.</string>
     <string name="speak_recognition_permission">ხმოვანი ბრძანებებისთვის მიკროფონზე წვდომაა საჭირო.</string>
     <string name="speak_recognition_failed">მეტყველების ამოცნობა ვერ მოხერხდა. სცადე ხელახლა.</string>
+    <string name="action_assistant_on">ასისტენტი ჩართულია — მიკროფონი გადასცემს. გასაჩერებლად დააჭირე.</string>
+    <string name="action_assistant_off">ასისტენტის ჩართვა (ხმა ინტერნეტით იგზავნება)</string>
+    <string name="assistant_consent_title">გამოვიყენოთ ხმოვანი ასისტენტი?</string>
+    <string name="assistant_consent_body">ასისტენტს თავისუფალი ქართული მეტყველება ესმის, ამიტომ ნათქვამი Google-ს ეგზავნება გასაგებად. კამერის სურათი, კიოსკის ეკრანიდან წაკითხული ტექსტი და შენი თითის მდებარეობა ამ ტელეფონს არასოდეს ტოვებს.\n\nმის გარეშეც აპი მუშაობს: მოკლე ხმოვან ბრძანებებს თავად ტელეფონში ცნობს, ეკრანს კითხულობს და თითს მიგიყვანს. ამის შეცვლა მოგვიანებითაც შეგიძლია.</string>
+    <string name="assistant_consent_accept">ასისტენტის გამოყენება</string>
+    <string name="assistant_consent_decline">ყველაფერი ამ ტელეფონში დარჩეს</string>
 </resources>

@@ -26,6 +26,14 @@ sealed interface SpokenMessage {
     /** The chosen button is still selected, but its position is no longer current enough. */
     data object TargetPositionLost : SpokenMessage
 
+    /**
+     * The kiosk screen itself is not being tracked, so nothing on it can be pointed at.
+     *
+     * Separate from [TargetPositionLost] because the user has to do something different:
+     * re-frame the kiosk, rather than hold still and wait for a fresh reading.
+     */
+    data object ScreenNotTracked : SpokenMessage
+
     /** A request arrived before the screen was understood; it is being read now. */
     data object ReadingScreen : SpokenMessage
 

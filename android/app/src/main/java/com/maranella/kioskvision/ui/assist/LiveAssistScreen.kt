@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -44,6 +45,7 @@ import com.maranella.kioskvision.pipeline.AssistancePhase
 import com.maranella.kioskvision.speech.SpeechOutputStatus
 import com.maranella.kioskvision.speech.SpokenMessageText
 import com.maranella.kioskvision.ui.main.CameraStatus
+import com.maranella.kioskvision.ui.assist.VoiceMode
 import com.maranella.kioskvision.ui.main.LargeActionButton
 import com.maranella.kioskvision.ui.main.MainUiState
 import com.maranella.kioskvision.ui.main.PermissionExplanation
@@ -125,11 +127,19 @@ fun LiveAssistScreen(
                     onVoiceCommand = viewModel::onVoiceCommandPressed,
                     onRepeat = viewModel::repeatLast,
                     onRescan = viewModel::rescan,
-                    onStop = viewModel::stopGuidance,
+                    onStop = viewModel::onStopPressed,
                 )
             } else {
                 CameraStatusPanel(cameraState.camera, onRetryCamera)
             }
+        }
+
+        if (state.showAssistantConsent) {
+            AssistantConsentDialog(
+                onAccept = { viewModel.onAssistantConsent(enabled = true) },
+                onDecline = { viewModel.onAssistantConsent(enabled = false) },
+                onDismiss = viewModel::dismissAssistantConsent,
+            )
         }
 
         if (state.showMicExplanation) {
@@ -183,8 +193,19 @@ private fun AssistPanel(
         )
     }
 
+    // One voice control. Which engine answers — the streaming assistant or on-device
+    // push-to-talk — is decided in the ViewModel from the user's saved choice, because that is
+    // an implementation detail and not a question to put to someone who cannot see the screen.
+    // The label states what is happening now, so a screen reader announces the microphone's
+    // actual state rather than an action.
     LargeActionButton(
-        label = stringResource(if (state.listening) R.string.action_cancel_listening else R.string.action_voice_command),
+        label = stringResource(
+            when {
+                state.voiceMode == VoiceMode.LiveAssistant -> R.string.action_assistant_on
+                state.listening -> R.string.action_cancel_listening
+                else -> R.string.action_voice_command
+            },
+        ),
         onClick = onVoiceCommand,
         modifier = Modifier.heightIn(min = 88.dp),
     )
@@ -275,3 +296,33 @@ private fun MicPermissionExplanation(
 
 private fun isDebuggable(context: android.content.Context): Boolean =
     context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+/**
+ * Asked once, the first time the user tries to talk.
+ *
+ * The choice is real in both directions: declining leaves a working app, because recognition,
+ * camera, OCR and guidance are all on-device. So the wording states the trade rather than
+ * steering — what is sent, what is not, and that the app works either way.
+ */
+@Composable
+private fun AssistantConsentDialog(
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.assistant_consent_title), fontSize = 24.sp) },
+        text = { Text(stringResource(R.string.assistant_consent_body), fontSize = 18.sp) },
+        confirmButton = {
+            TextButton(onClick = onAccept) {
+                Text(stringResource(R.string.assistant_consent_accept), fontSize = 20.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) {
+                Text(stringResource(R.string.assistant_consent_decline), fontSize = 20.sp)
+            }
+        },
+    )
+}

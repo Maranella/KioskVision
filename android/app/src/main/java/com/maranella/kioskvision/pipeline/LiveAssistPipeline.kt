@@ -22,7 +22,14 @@ import com.maranella.kioskvision.assist.GuidanceInput
 import com.maranella.kioskvision.assist.GuidanceOutput
 import com.maranella.kioskvision.assist.GuidanceUnavailable
 import com.maranella.kioskvision.assist.OcrUpdate
+import com.maranella.kioskvision.assist.GuidanceSpace
+import com.maranella.kioskvision.assist.KioskScene
 import com.maranella.kioskvision.assist.ObservedLabel
+import com.maranella.kioskvision.camera.Point
+import com.maranella.kioskvision.camera.ScreenDetector
+import com.maranella.kioskvision.camera.ScreenLoss
+import com.maranella.kioskvision.camera.ScreenSpace
+import com.maranella.kioskvision.camera.ScreenTracker
 import com.maranella.kioskvision.assist.OneEuroFilter2D
 import com.maranella.kioskvision.assist.Rejection
 import com.maranella.kioskvision.assist.ScreenReader
@@ -221,6 +228,10 @@ class LiveAssistPipeline(
     private var handTracker: HandLandmarkTracker? = null
     private var ocrEngine: KioskOcrEngine? = null
     private val tracker = TargetTracker()
+    private val screenDetector = ScreenDetector()
+    private val screenTracker = ScreenTracker()
+    private var lastScreenDetectMs = 0L
+    private val luminanceScratch = IntArray(SIGNATURE_SOURCE * SIGNATURE_SOURCE)
     private val engine = DirectionalGuidanceEngine()
     private val announcer = GuidanceAnnouncer()
     private val smoother = OneEuroFilter2D()
@@ -309,6 +320,12 @@ class LiveAssistPipeline(
     @VisibleForTesting
     fun resetForTest() = executor.execute {
         tracker.reset()
+        // Screen geometry has to go with it. R-17 was caused by state leaking between trials,
+        // and a quadrilateral carried over from a previous run is exactly that kind of leak.
+        screenTracker.reset()
+        lastScreenDetectMs = 0L
+        latestScene = KioskScene.empty(0L)
+        cachedLabels = emptyList()
         resetGuidance()
         clearPending()
         phase = AssistancePhase.Idle
@@ -407,6 +424,9 @@ class LiveAssistPipeline(
         measureSharpness(frame, raw, now)
         val blurred = updateBlurState(now)
 
+        // --- Screen geometry --------------------------------------------------------------
+        maybeDetectScreen(frame, now)
+
         // --- Pipeline A: screen understanding, on demand ----------------------------------
         lastHandRegion = raw?.let { handRegionAround(it, frame.size) }
         val bitmapHandedOff = maybeStartOcr(frame, raw, now, blurred, steady)
@@ -414,7 +434,7 @@ class LiveAssistPipeline(
         // --- Guidance ---------------------------------------------------------------------
         var output: GuidanceOutput? = null
         if (phase == AssistancePhase.GuidingFinger) {
-            output = engine.update(GuidanceInput(now, tracker.target, smoothed, frame.size, steady))
+            output = engine.update(guidanceInput(now, smoothed, steady))
             val toSpeak = announcer.onDirection(output.direction, now)
             if (toSpeak != null && !speechMuted) {
                 // TARGET_UNCERTAIN is one direction but several situations, and saying "I have
@@ -629,6 +649,8 @@ class LiveAssistPipeline(
         lastOcrFinishedMs = now
 
         val update = tracker.onOcrResult(blocks, size, now, startedAtMs, lastHandRegion)
+        // The only point at which what OCR has read can change.
+        cachedLabels = tracker.corroborated
         lastOcrUpdate = update::class.simpleName
         when (update) {
             is OcrUpdate.ScreenChanged -> {
@@ -721,6 +743,10 @@ class LiveAssistPipeline(
         // this distance, so the useful instruction is to come closer — not to re-frame.
         screenUnreadableNow() -> SpokenMessage.CannotReadText
 
+        // No rectified screen at all. The user has to re-frame the kiosk; telling them the
+        // button's position has gone stale would send them to fix the wrong thing.
+        reason == GuidanceUnavailable.ScreenNotTracked -> SpokenMessage.ScreenNotTracked
+
         // Chosen, but not yet corroborated by OCR.
         reason == GuidanceUnavailable.Unconfirmed -> SpokenMessage.ReadingScreen
 
@@ -765,8 +791,168 @@ class LiveAssistPipeline(
         return distance > SCREEN_CHANGE_SIGNATURE_DISTANCE
     }
 
+    /**
+     * Expresses the target and the fingertip in canonical screen space before guidance runs.
+     *
+     * This is where rectification earns its place. In frame pixels a label and a fingertip are
+     * two points in a photograph: they coincide only when the phone faces the screen squarely,
+     * and at any other angle the offset between them is partly the viewing angle rather than
+     * the distance the finger has to travel. Guiding from that produces directions that are
+     * confidently wrong, which for a blind user is worse than no direction at all.
+     *
+     * When no screen is being tracked the input is returned with no target, so the engine
+     * refuses with [GuidanceUnavailable.ScreenNotTracked] rather than falling back to frame
+     * coordinates. The fallback would work on a head-on screen and mislead on every other one,
+     * which is precisely the failure that cannot be allowed to be silent.
+     */
+    private fun guidanceInput(now: Long, fingertip: FingertipPoint?, steady: Boolean): GuidanceInput {
+        val target = tracker.target
+        val screen = screenTracker.geometry(now)
+
+        if (target == null) {
+            return GuidanceInput(now, null, fingertip, GuidanceSpace.KIOSK_SCREEN, steady)
+        }
+        if (screen == null) {
+            // The target is passed through so the engine can tell "no screen" from "nothing
+            // selected", but screenTracked = false makes it refuse before it reads the box,
+            // which is still in camera coordinates here.
+            return GuidanceInput(
+                timestampMs = now,
+                target = target,
+                fingertip = fingertip,
+                space = GuidanceSpace.KIOSK_SCREEN,
+                deviceSteady = steady,
+                screenTracked = false,
+            )
+        }
+
+        val boxOnScreen = ScreenSpace.toScreen(screen, target.box)
+        val tipOnScreen = fingertip?.let { tip ->
+            ScreenSpace.toScreen(screen, Point(tip.x, tip.y))
+                ?.let { FingertipPoint(it.x, it.y, tip.confidence) }
+        }
+        if (boxOnScreen == null) {
+            // Found but not rectifiable from this frame — the same situation as not having it.
+            return GuidanceInput(
+                timestampMs = now,
+                target = target,
+                fingertip = tipOnScreen,
+                space = GuidanceSpace.KIOSK_SCREEN,
+                deviceSteady = steady,
+                screenTracked = false,
+            )
+        }
+
+        return GuidanceInput(
+            timestampMs = now,
+            target = target.copy(box = boxOnScreen),
+            fingertip = tipOnScreen,
+            space = GuidanceSpace.KIOSK_SCREEN,
+            deviceSteady = steady,
+        )
+    }
+
+    /**
+     * Looks for the kiosk screen, on a timer rather than on every frame.
+     *
+     * A handheld phone does not move appreciably between two consecutive frames, so detecting
+     * per frame would repeat the same answer at the cost of the hand tracking that genuinely
+     * does need every frame. The tracker works in wall-clock time, so this interval can change
+     * without altering when geometry goes stale.
+     */
+    private fun maybeDetectScreen(frame: AnalysisFrame, now: Long) {
+        if (phase == AssistancePhase.Idle) return
+        if (now - lastScreenDetectMs < SCREEN_DETECT_INTERVAL_MS) return
+        lastScreenDetectMs = now
+
+        val pixels = scaledPixels(frame.bitmap) ?: return
+        for (i in pixels.indices) {
+            val argb = pixels[i]
+            // Rec. 601 luma, integer-weighted to stay off the floating-point path on a
+            // per-pixel loop that runs several times a second.
+            luminanceScratch[i] = (
+                299 * ((argb shr 16) and 0xFF) +
+                    587 * ((argb shr 8) and 0xFF) +
+                    114 * (argb and 0xFF)
+                ) / 1000
+        }
+
+        val candidate = screenDetector.detect(luminanceScratch, SIGNATURE_SOURCE, SIGNATURE_SOURCE)
+        // The grid is square and the frame is not, so each axis is unsquashed separately.
+        val inFrame = candidate?.let {
+            it.copy(
+                quad = it.quad.scaled(
+                    frame.size.width.toFloat() / SIGNATURE_SOURCE,
+                    frame.size.height.toFloat() / SIGNATURE_SOURCE,
+                ),
+            )
+        }
+        screenTracker.onDetection(inFrame, now)
+        latestScene = currentScene(now)
+    }
+
+    /**
+     * The most recent scene, readable from any thread.
+     *
+     * The Live SDK calls its function handler synchronously on its own thread, and that
+     * handler has to answer "does this exist on the screen" without blocking the audio
+     * session. Hopping to the pipeline thread and waiting would risk stalling capture, so the
+     * scene is published here instead and read as a snapshot. Published from the pipeline
+     * thread, read from anywhere; a reader may see a scene a few hundred milliseconds old,
+     * which is why [KioskScene.observedAtMs] travels with it.
+     */
+    @Volatile
+    var latestScene: KioskScene = KioskScene.empty(0L)
+        private set
+
+    /**
+     * Corroborated labels as of the last OCR result.
+     *
+     * [TargetTracker.corroborated] recomputes agreement across recent runs, comparing every
+     * label against every earlier one by string similarity. That is affordable when OCR
+     * finishes — a few times a second at most — and wasteful on the screen-detection timer,
+     * which fires far more often and cannot change what OCR read. Caching it keeps the
+     * expensive part on the thread that must keep up with the camera down to a homography per
+     * label.
+     */
+    private var cachedLabels: List<ObservedLabel> = emptyList()
+
+    /**
+     * The kiosk screen as currently observed, for anything that needs the whole picture rather
+     * than one target: explaining the screen, resolving an intent, or deciding that neither is
+     * possible right now.
+     *
+     * Called on the pipeline thread.
+     */
+    fun currentScene(now: Long = SystemClock.elapsedRealtime()): KioskScene {
+        val size = lastFrameSize ?: return KioskScene.empty(now)
+        return KioskScene.from(
+            labels = cachedLabels,
+            screen = screenTracker.geometry(now),
+            frameWidth = size.width,
+            frameHeight = size.height,
+            nowMs = now,
+        )
+    }
+
+    /** Why screen geometry is unusable, or null when it is fine. Pipeline thread. */
+    fun screenLoss(now: Long = SystemClock.elapsedRealtime()): ScreenLoss? = screenTracker.loss(now)
+
     /** Draws the frame into the reusable scratch bitmap and returns its luminance signature. */
     private fun signatureOf(bitmap: Bitmap): FloatArray? {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return null
+        scaledPixels(bitmap) ?: return null
+        return FrameQuality.signature(scratchPixels, SIGNATURE_SOURCE, SIGNATURE_SOURCE)
+    }
+
+    /**
+     * Draws the frame into the one reusable scratch bitmap and returns its pixels.
+     *
+     * Shared by the screen-change signature and screen detection so a frame is downscaled at
+     * most once, and so the two can never end up looking at differently scaled versions of it.
+     * The returned array is the scratch buffer itself and is overwritten by the next call.
+     */
+    private fun scaledPixels(bitmap: Bitmap): IntArray? {
         if (bitmap.width <= 0 || bitmap.height <= 0) return null
         val scratch = scratchBitmap ?: createBitmap(SIGNATURE_SOURCE, SIGNATURE_SOURCE).also {
             scratchBitmap = it
@@ -779,7 +965,7 @@ class LiveAssistPipeline(
         )
         canvas.drawBitmap(bitmap, scratchMatrix, scratchPaint)
         scratch.getPixels(scratchPixels, 0, SIGNATURE_SOURCE, 0, 0, SIGNATURE_SOURCE, SIGNATURE_SOURCE)
-        return FrameQuality.signature(scratchPixels, SIGNATURE_SOURCE, SIGNATURE_SOURCE)
+        return scratchPixels
     }
 
     // --- Focus and sharpness ------------------------------------------------------------------
@@ -1205,6 +1391,12 @@ class LiveAssistPipeline(
 
         /** Side of the square the frame is drawn into for the screen signature. */
         const val SIGNATURE_SOURCE = 64
+
+        /**
+         * How often the kiosk screen is looked for. Fast enough to follow a phone being
+         * repositioned, far slower than the frame rate, which the hand tracking owns.
+         */
+        const val SCREEN_DETECT_INTERVAL_MS = 220L
         const val SIGNATURE_INTERVAL_MS = 200L
 
         /** Mean absolute luminance change, outside the hand, that brings an OCR run forward. */

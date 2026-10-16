@@ -6,7 +6,7 @@ import org.junit.Test
 
 class GuidanceTest {
 
-    private val frame = FrameSize(720, 1280)
+    private val space = GuidanceSpace.ofFrame(FrameSize(720, 1280))
 
     /** Label centred at (360, 640), 200×40 px → on-target zone ±60 × ±24 px (diagonal floor 22 px). */
     private val target = TrackedTarget(
@@ -30,7 +30,7 @@ class GuidanceTest {
         timestampMs = timeMs,
         target = target,
         fingertip = if (tipX != null && tipY != null) FingertipPoint(tipX, tipY, confidence) else null,
-        frame = frame,
+        space = space,
         deviceSteady = steady,
     )
 

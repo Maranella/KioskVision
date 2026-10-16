@@ -38,7 +38,7 @@ import kotlinx.coroutines.launch
  */
 class VoiceSpikeActivity : ComponentActivity() {
 
-    private val provider = GeminiLiveVoiceProvider()
+    private val provider = GeminiLiveVoiceProvider(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

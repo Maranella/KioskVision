@@ -146,4 +146,14 @@ object TargetMatcher {
 
     private fun conceptsIn(normalized: String): Set<String> =
         concepts.filterValues { stems -> stems.any { normalized.contains(it) } }.keys
+
+    /**
+     * The concepts a piece of text belongs to, for callers that need to label an element
+     * rather than match a query. Exposed so the scene model reuses this one dictionary instead
+     * of growing a second, silently diverging copy of it.
+     */
+    fun conceptsOf(text: String): Set<String> = conceptsIn(TextNormalizer.normalize(text))
+
+    /** Whether a concept moves money or commits an action. */
+    fun isCritical(concept: String): Boolean = concept in criticalConcepts
 }

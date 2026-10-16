@@ -14,16 +14,52 @@ enum class GuidanceDirection {
     TARGET_UNCERTAIN,
 }
 
-/** Fingertip in frame pixels, after smoothing. */
+/** Fingertip after smoothing, in the guidance space described by [GuidanceSpace]. */
 data class FingertipPoint(val x: Float, val y: Float, val confidence: Float)
+
+/**
+ * The coordinate space the engine is working in, carried as its diagonal because every
+ * threshold below is a fraction of it.
+ *
+ * [KIOSK_SCREEN] is the one the product uses: canonical screen space, the unit square over the
+ * detected kiosk screen. Its diagonal is sqrt(2), so the engine's floor becomes a fraction of
+ * the *screen* — a physically meaningful size, since the kiosk's panel does not change size.
+ * A fraction of the camera frame, which [ofFrame] gives, means something different at every
+ * distance: the same floor is a large part of the screen when the phone is far away and a
+ * sliver when it is close.
+ *
+ * [ofFrame] is kept for tests that exercise the engine's arithmetic directly without a
+ * detected screen. Guidance to a real user always runs in [KIOSK_SCREEN].
+ */
+@JvmInline
+value class GuidanceSpace(val diagonal: Float) {
+    companion object {
+        /** Canonical screen space: the unit square over the kiosk screen. */
+        val KIOSK_SCREEN = GuidanceSpace(kotlin.math.sqrt(2f))
+
+        fun ofFrame(frame: FrameSize) = GuidanceSpace(frame.diagonal)
+    }
+}
 
 data class GuidanceInput(
     val timestampMs: Long,
+    /** Target whose [TrackedTarget.box] is expressed in [space]. */
     val target: TrackedTarget?,
     val fingertip: FingertipPoint?,
-    val frame: FrameSize,
+    val space: GuidanceSpace,
     /** False while the phone is rotating noticeably; shortens how long an anchor is trusted. */
     val deviceSteady: Boolean,
+    /**
+     * Whether a rectified kiosk screen is currently being tracked.
+     *
+     * Passed explicitly rather than inferred from a missing target, because the two mean
+     * different things to the user: nothing selected calls for silence, no screen calls for
+     * re-framing the phone. Collapsing them left the user hearing nothing at the one moment
+     * they needed to be told something.
+     *
+     * When false, [target]'s box has not been converted and must not be read.
+     */
+    val screenTracked: Boolean = true,
 )
 
 /**
@@ -40,6 +76,16 @@ enum class GuidanceUnavailable {
 
     /** The target's measured position has not been refreshed recently enough to aim at. */
     GeometryStale,
+
+    /**
+     * The kiosk screen is not being tracked, so positions on it cannot be compared at all.
+     *
+     * Distinct from [GeometryStale]: there the target's own anchor aged, here there is no
+     * rectified screen to express any position in. Without one a fingertip and a label are
+     * two points in a camera image that only coincide when the phone happens to face the
+     * screen squarely, so a direction derived from them would be confident and wrong.
+     */
+    ScreenNotTracked,
 }
 
 data class GuidanceOutput(
@@ -55,10 +101,17 @@ data class GuidanceOutput(
  * Converts target and fingertip geometry into a semantic direction. Pure and deterministic;
  * not thread-safe (one instance per pipeline).
  *
- * All positions are frame pixels. For this prototype the frame is treated as the kiosk
- * screen plane, which only holds when the screen faces the camera roughly head-on (see
- * docs/SPIKES_AND_DECISIONS.md, R-07: a finger hovering above the glass is displaced by
- * about `height · tan(viewing angle)`).
+ * All positions are in the space named by [GuidanceInput.space], which for a real session is
+ * canonical screen space: the detected kiosk screen rectified to the unit square. The engine
+ * itself is space-agnostic — every threshold is a fraction of the target or of the space's
+ * diagonal — so switching spaces changes what the numbers mean without changing the logic.
+ *
+ * **What rectification does and does not fix.** It removes the perspective error from the
+ * screen plane, so a label's position no longer depends on the angle the phone is held at. It
+ * does **not** remove the parallax of a finger held *above* the glass, which is displaced by
+ * about `height · tan(viewing angle)` (R-07) and would need depth to correct. On Android there
+ * is no depth sensor, so that error remains and is the reason the on-target zone is a dwell
+ * in the image rather than a claim that the glass was touched.
  *
  * ### Thresholds (all relative to the target or frame, never fixed pixel counts)
  * - **On-target zone**: a rectangle around the label centre with half-width
@@ -106,6 +159,9 @@ class DirectionalGuidanceEngine {
             return GuidanceOutput(GuidanceDirection.TARGET_UNCERTAIN, unavailable = GuidanceUnavailable.NoTarget)
         }
         val unavailable = when {
+            // Checked before anything geometric: without a rectified screen the target's box
+            // is in camera coordinates and is not comparable with the fingertip at all.
+            !input.screenTracked -> GuidanceUnavailable.ScreenNotTracked
             !target.isStable -> GuidanceUnavailable.Unconfirmed
             !target.isFreshAt(input.timestampMs, maxAnchorAge) -> GuidanceUnavailable.GeometryStale
             else -> null
@@ -120,7 +176,7 @@ class DirectionalGuidanceEngine {
             return GuidanceOutput(GuidanceDirection.HAND_NOT_DETECTED)
         }
 
-        val diagonalFloor = ZONE_FLOOR_OF_DIAGONAL * input.frame.diagonal
+        val diagonalFloor = ZONE_FLOOR_OF_DIAGONAL * input.space.diagonal
         val halfWidth = max(ZONE_WIDTH_FRACTION * target.box.width, diagonalFloor)
         val halfHeight = max(ZONE_HEIGHT_FRACTION * target.box.height, diagonalFloor)
         val dx = (tip.x - target.box.centerX) / halfWidth

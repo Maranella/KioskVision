@@ -72,6 +72,7 @@
     <string name="speak_cannot_read_text">I cannot read the text. Move a little closer to the screen.</string>
     <string name="speak_target_uncertain">Cannot point to the button right now.</string>
     <string name="speak_target_position_lost">I have lost where the button is. Keep the kiosk screen in view.</string>
+    <string name="speak_screen_not_tracked">I cannot see the kiosk screen clearly. Point the phone at it.</string>
     <string name="speak_reading_screen">Checking the screen.</string>
     <string name="speak_hold_still">Let me see the screen for a moment.</string>
     <string name="speak_guidance_stopped">Guidance stopped.</string>
@@ -82,4 +83,10 @@
     <string name="speak_recognition_unavailable">Speech recognition is not available on this device.</string>
     <string name="speak_recognition_permission">Microphone access is needed for voice commands.</string>
     <string name="speak_recognition_failed">Speech recognition failed. Try again.</string>
+    <string name="action_assistant_on">Assistant on — microphone streaming. Tap to stop.</string>
+    <string name="action_assistant_off">Start the assistant (sends voice over the internet)</string>
+    <string name="assistant_consent_title">Use the voice assistant?</string>
+    <string name="assistant_consent_body">The assistant understands free Georgian speech, so what you say is sent to Google to be understood. Camera images, the text read from the kiosk screen and your finger position never leave this phone.\n\nWithout it the app still works: it recognises short spoken commands on the phone itself, reads the screen and guides your finger. You can change this later.</string>
+    <string name="assistant_consent_accept">Use the assistant</string>
+    <string name="assistant_consent_decline">Keep everything on this phone</string>
 </resources>

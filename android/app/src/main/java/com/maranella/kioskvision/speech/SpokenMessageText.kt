@@ -35,6 +35,7 @@ object SpokenMessageText {
         SpokenMessage.ScreenOutOfFocus -> resources.getString(R.string.speak_screen_out_of_focus)
         SpokenMessage.CannotReadText -> resources.getString(R.string.speak_cannot_read_text)
         SpokenMessage.TargetPositionLost -> resources.getString(R.string.speak_target_position_lost)
+        SpokenMessage.ScreenNotTracked -> resources.getString(R.string.speak_screen_not_tracked)
         SpokenMessage.ReadingScreen -> resources.getString(R.string.speak_reading_screen)
         SpokenMessage.HoldStill -> resources.getString(R.string.speak_hold_still)
         SpokenMessage.GuidanceStopped -> resources.getString(R.string.speak_guidance_stopped)

@@ -66,6 +66,11 @@ dependencies {
     // that this project's Kotlin 2.2.10 compiler rejects.
     implementation(platform("com.google.firebase:firebase-bom:35.0.1"))
     implementation("com.google.firebase:firebase-ai")
+    // Not an added capability: firebase-ai's own public API exposes function-call arguments
+    // and responses as kotlinx JsonElement, so handling a tool call requires the type on the
+    // compile classpath. Pinned to the version firebase-ai already resolves at runtime
+    // (checked via the dependency tree) so the two cannot diverge.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
     // Debug-only App Check provider; a release build must use Play Integrity instead.
     debugImplementation("com.google.firebase:firebase-appcheck-debug")
 

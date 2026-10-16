@@ -1083,6 +1083,391 @@ and never trusts an LLM-asserted target as authoritative.
 
 ---
 
+### R-21 — Guidance now runs in rectified screen space, not camera pixels
+
+**Type:** implementation + measurement, 2026-10-16. Unit-tested; **not verified
+at a kiosk.**
+
+Until now `camera/FrameGeometry.kt` approximated the kiosk screen by the whole
+camera frame, which its own documentation admitted is "only valid when the
+screen faces the camera roughly head-on". Product milestone M1 could not pass
+without screen detection, and every coordinate downstream inherited the
+approximation.
+
+#### What was built
+
+| File | Responsibility |
+|---|---|
+| `camera/Homography.kt` | 3x3 projective transform; 4-point solve by Gaussian elimination with partial pivoting; inverse; corner ordering |
+| `camera/ScreenDetector.kt` | Otsu threshold, flood fill, convex hull, four dominant corners |
+| `camera/ScreenTracker.kt` | Temporal smoothing, jump rejection, stability, staleness and loss |
+| `camera/ScreenSpace.kt` | The single place frame and screen coordinates convert |
+| `assist/KioskScene.kt` | Structured scene: elements, roles, readability, freshness |
+| `assist/TargetResolver.kt` | Intent to verified target, or a typed refusal |
+
+Detection, tracking and rectification are kept separate, because they fail
+separately: a screen can be found but not rectifiable, or rectifiable but
+no longer current.
+
+**OpenCV was rejected.** The textbook contour-and-approxPolyDP pipeline would
+add roughly 70 MB of native dependency to find one quadrilateral, and none of
+it would run in the JVM unit tests this repository depends on. The detector is
+ordinary Kotlin and is tested without a device.
+
+Two details that were silently wrong in the obvious implementation:
+
+- **Corner ordering by angle, not by coordinate sums.** The common "top-left
+  is the smallest x+y" trick mislabels corners once the quadrilateral rotates
+  past about 45 degrees, which is ordinary for a handheld phone.
+- **Anisotropic rescaling.** Detection runs on a square 64x64 grid while the
+  frame is not square. One scale factor for both axes stretches every corner,
+  which moves every target on the screen.
+
+#### Why this changes the answer, measured
+
+Constructed case: a screen viewed from the left, a label centred at 30% across
+the glass, a fingertip at 55% — a quarter of the screen apart, horizontally.
+
+| Space | Offset in zone units | Vertical component |
+|---|---|---|
+| Rectified screen | **10.42** | 0.02 |
+| Camera pixels | 5.81 | 0.05 |
+
+Screen space recovers the constructed distance exactly (0.25 of the screen
+divided by the 0.024 zone half-width). Camera pixels put the same gap at 56%
+of it.
+
+**Understating is the dangerous direction.** The near-zone and on-target
+thresholds are both comparisons against this number, so a finger further from
+the button than the app believes is told it has arrived sooner than it has —
+to a blind user, in front of a payment terminal.
+
+#### Thresholds became physically meaningful
+
+The engine's floor was 1.5% of the *camera frame* diagonal. A fraction of the
+frame is a different physical size at every distance: generous when the phone
+is far from the screen, a sliver when close. Expressed against the screen's own
+diagonal it is a fixed fraction of a panel whose size does not change. A test
+pins that the same physical label filmed near and far now yields the same
+verdict.
+
+#### No screen means no direction
+
+`GuidanceUnavailable.ScreenNotTracked` was added and `GuidanceInput` carries
+`screenTracked` explicitly. The first implementation signalled it by passing a
+null target, which the engine reported as `NoTarget` — answered with silence.
+The user would have heard nothing at the one moment they needed to be told to
+re-frame the phone. It is now a distinct spoken message
+(„კიოსკის ეკრანს ვერ ვარჩევ. ტელეფონი ეკრანისკენ მიმართე.").
+
+#### What rectification does not fix
+
+It removes perspective error **in the screen plane**. It does nothing about a
+finger held *above* the glass, displaced by about `height · tan(angle)`
+(R-07), which needs depth. Android has no depth sensor, so that error remains
+and is why the on-target zone is still a dwell in the image rather than a
+claim that the glass was touched. R-13's framing conflict is likewise
+untouched.
+
+#### A test that was wrong, twice
+
+The first version asserted that rectification flips the spoken direction. It
+does not, for the quadrilateral chosen — both spaces said `LEFT`. The second
+guessed a threshold for a vertical artefact that was not there. Both failed,
+and the right response was to measure the actual offsets and assert what they
+showed, rather than adjust the geometry until a desired disagreement appeared.
+The surviving test asserts the understatement, which is the real mechanism and
+the one with a safety consequence.
+
+#### What the device run does and does not establish
+
+179 unit tests and **15 instrumented tests pass on the physical Samsung
+SM-S731B**, including `LiveAssistScenarioTest.theWholeAssistScenario`, which
+drives the real pipeline with real Tesseract and real MediaPipe.
+
+That test is load-bearing here, not incidental. It asserts `LEFT`, `UP` and
+`ON_TARGET`, and all three are unreachable when `screenTracked` is false,
+because the engine then returns `TARGET_UNCERTAIN`. Its passing is therefore
+positive evidence that the detector finds the screen in those frames and that
+guidance is running through the rectified path — the integration is not merely
+compiled.
+
+**What it is not.** Those frames are rendered, not photographed: no lens, no
+glare, no housing, no ambient light. The detector's central assumption — that
+the kiosk screen is the brightest large convex region — remains untested
+against a window, a ceiling light or a reflection. Tests assert it abstains on
+a flat frame and on a near-full-frame bright region, but synthetic abstention
+is not evidence about a real foyer, which is exactly the lesson of R-17.
+
+---
+
+### R-22 — The Live assistant is part of the app, and the microphone has one owner
+
+**Type:** implementation, 2026-10-16. **Verified on the physical device.**
+
+Gemini Live was reachable only from a debug spike with its own launcher icon.
+It is now started from the real assistance screen, and the spike has lost its
+`LAUNCHER` entry — a second icon would have offered a parallel way into a voice
+session that knows nothing about the kiosk.
+
+#### The microphone can only have one owner
+
+The app already had a microphone consumer: `SpeechCommandRecognizer`,
+push-to-talk, on-device. Gemini Live needs a continuous stream. Android grants
+capture to one consumer, so two recognisers competing is not a degraded
+experience, it is a broken one.
+
+`VoiceMode` makes the ownership explicit, with `LocalCommands` the default
+because it needs no network and sends nothing anywhere. Starting the assistant
+cancels the recogniser; pressing push-to-talk stops the assistant, because a
+user pressing the button has stated which one they want.
+
+#### Measured on the device, not inferred from the UI
+
+The button label flips optimistically, so it proves nothing on its own.
+`appops` was used instead:
+
+| Action | `RECORD_AUDIO` |
+|---|---|
+| Assistant started from the assist screen | `allow; (running)` |
+| Assistant stopped by the user | `duration=+46s`, no longer running |
+| Home pressed with the assistant on | `duration=+7s`, released |
+| Push-to-talk pressed with the assistant on | assistant returned to off |
+
+The third row is the one worth having: the microphone does not stay open behind
+a backgrounded screen, and audio stops being streamed to Google the moment the
+user leaves.
+
+#### Reconnection is bounded
+
+`ReconnectPolicy` separates the two reasons a session ends. A planned rollover
+— the server warns about one roughly every ten minutes — reconnects after
+250 ms and **does not consume the retry budget**, since otherwise a long and
+healthy conversation would end itself simply by lasting. A failure backs off by
+doubling from 1 s, caps at 15 s, and gives up after four attempts, because
+retrying a revoked key or a retired model in a loop burns the request quota
+that the free tier actually limits, holds the microphone, and never succeeds.
+On giving up the app falls back to on-device commands rather than leaving a
+dead assistant: camera, OCR and guidance all work without the network.
+
+The policy is a separate, pure class, so all of this is unit-tested without a
+network.
+
+#### Two voices, one audio channel
+
+`AudioOutputCoordinator` implements what the integration spec asks for. The
+ranking is by consequence, not recency: a direction, or a message that
+*withdraws* guidance, preempts conversation, because letting the assistant talk
+over „ღილაკის ადგილი დავკარგე" leaves the user reaching for a position the app
+no longer stands behind. Descriptions are **dropped rather than queued** — by
+the time a sentence finishes the finger has moved, and a direction computed a
+second ago points where the finger no longer is.
+
+#### ADR-009 is now executable
+
+`VoiceBoundaryTest` reflects over `VoiceProvider` and `VoiceSessionReport` and
+fails the build if either grows a member mentioning a perception type —
+`DetectedTextBlock`, `KioskScene`, `TrackedTarget`, `Bitmap` and so on — and
+asserts the interface still exposes nothing but `start`, `stop` and the report.
+A fourth test checks the checker, so renaming a perception type cannot leave it
+quietly passing against names that match nothing.
+
+This matters because R-20's lesson was that a prompt is not a control. An
+invariant written in a document is an intention; one that fails the build is a
+constraint.
+
+#### Known gaps, unchanged by this work
+
+- **The app's own speech still enters the Live microphone.** The coordinator
+  arbitrates *output*; it cannot stop guidance audio from being captured and
+  transcribed as the user. Same root cause as barge-in being disabled (R-18),
+  and it needs either a routed output path or a capture gate the SDK does not
+  expose.
+- **`PreemptModel` does not actually silence the model.** The SDK owns that
+  playback. The decision reduces overlap rather than removing it, and the code
+  says so rather than implying otherwise.
+- **No `Interrupted` session state.** The spec asks for one, but the provider
+  cannot currently distinguish it, and `VoiceProvider` holds that a lifecycle
+  which lies is worse than a coarse one.
+- **Network loss is handled only through reconnection,** not by observing
+  connectivity. A dropped network looks like a failure and backs off; the app
+  does not yet know *why*, so it cannot say so.
+
+---
+
+### R-23 — One voice control, and an intent that bypasses the broken transcript
+
+**Type:** implementation, 2026-10-16. **Verified on the physical device.**
+
+R-22 left the app with two voice buttons: push-to-talk for on-device commands,
+and a separate switch for the streaming assistant. The product owner asked why,
+and the honest answer was that the second button existed because the
+integration was unfinished — the assistant could talk but could not act.
+Nothing routed its understanding into the app, so it had to sit beside the
+control that did.
+
+**Two controls that both mean "talk", in front of someone who cannot see
+either, is a design error.** Its two justifications do not survive inspection:
+microphone exclusivity is an implementation detail the app should settle
+itself, and consent to stream audio is a decision made once, not a mode
+re-selected before every sentence.
+
+#### Where the intent comes from
+
+Not from the input transcript. R-19 established that
+`inputAudioTranscription` returns Latin transliteration and, at times, Spanish,
+German or Devanagari, while the model's comprehension of the Georgian stays
+correct. Routing intents through it would have been building on the one part
+measured to be unreliable.
+
+Function calling is the mechanism, and the SDK supports it — verified against
+the firebase-ai 18.0.0 AAR before being designed around: `liveModel` accepts
+`List<Tool>`, `Tool.functionDeclarations` takes `FunctionDeclaration`s, and
+`LiveAudioConversationConfig.Builder.setFunctionCallHandler` delivers a
+`FunctionCallPart` and expects a `FunctionResponsePart` back, synchronously.
+A call therefore comes from the comprehension that works, not the transcript
+that does not.
+
+Three functions, and that is the entire surface: `select_target(query)`,
+`stop_guidance()`, `read_screen()`. The model cannot press anything, move a
+pointer, read a frame or learn a coordinate.
+
+#### ADR-009 survives the model gaining the ability to act
+
+The function response carries **one field**: an outcome from a closed set —
+`guiding`, `notonscreen`, `unconfirmed`, `ambiguous`, `screennotreadable`,
+`noscreen`, `stopped`, `reading`. No label, no position, no screen text. A
+test asserts that list exactly, so a future outcome carrying screen content
+would have to be added in plain sight.
+
+So **no scene data leaves the device even now**. The model asks for something
+and is told yes or no; it still has no idea what the kiosk says. The detail
+the user actually needs — which two buttons are similar, and what they read —
+is spoken locally from `SpokenMessage`, grounded in what the camera saw. The
+open privacy question about sending the model scene context did not have to be
+answered, because it turned out not to need answering.
+
+The pipeline remains the single authority on the live target: the resolver's
+verdict is what the *assistant* is told, while the selection still goes through
+`pipeline.selectTarget`, which owns anchoring, confirmation and screen
+transitions. Both reach their answer through `TargetMatcher`, so they agree
+about what exists; the pipeline simply knows more.
+
+#### Consent became a setting
+
+`VoicePreferences`, default off, asked once at the moment it first matters
+rather than buried in a settings screen. The wording states the trade in both
+directions, because declining leaves a working app: recognition, camera, OCR
+and guidance are all on-device.
+
+#### A real defect the device run exposed
+
+Stopping the session cancelled the job while `start()` was suspended, and the
+provider's `catch (e: Exception)` swallowed the `CancellationException` and
+reported `VoiceSessionState.Error`. A deliberate stop was being recorded as a
+failure — which `ReconnectPolicy` would have counted against its retry budget —
+and swallowing a cancellation breaks structured concurrency besides. It is now
+caught separately, reported as `Stopped`, and rethrown.
+
+#### Measured on the device
+
+| Action | Result |
+|---|---|
+| First press of the one voice button | Consent dialog, both options offered neutrally |
+| Accepting | Session starts: `RECORD_AUDIO allow; (running)` |
+| Pressing again | `duration=+8s`, microphone released |
+| `live session failed` in logcat | **0** |
+
+#### Still open
+
+- The assistant's tool calls have **not been exercised against the live
+  model**. The wiring is verified; whether `gemini-3.8-live` actually calls
+  `select_target` when asked „სად არის გადახდის ღილაკი?" is unmeasured, and
+  needs a kiosk or a mock screen in front of the camera.
+- The app's own speech still enters the Live microphone (R-22), unchanged.
+- No way to change the consent choice after it is made, beyond clearing app
+  data. A settings entry is owed.
+
+---
+
+### R-24 — The assistant went silent because the service was full, and my A/B said otherwise
+
+**Type:** investigation, 2026-10-16. Cause external; two real defects found alongside it.
+
+The assistant stopped answering. The Live socket reported
+`ServiceConnectionHandshakeFailedException: Channel was closed by the server`,
+which the SDK gives without a reason (R-18).
+
+#### The false A/B
+
+Tool declarations had just been added, so they were the obvious suspect. A
+session without tools connected; a session with them did not. That looked
+conclusive and was not: **the two arms ran minutes apart**, and the server's
+state changes on that timescale. Run back to back, the no-tools arm failed too,
+with the same exception.
+
+`diagnose()` — which exists precisely because the socket closes mutely — then
+named it on an ordinary request:
+
+> `ServerException: This model is currently experiencing high demand. Spikes in
+> demand are usually temporary. Please try again later.`
+
+So the cause is capacity on the no-cost tier, not the code. The earlier note
+that cost is zero but **rate limits are the real constraint** is what this looks
+like in practice.
+
+The methodological error is the one R-17 was written about. An A/B whose arms
+are separated in time is not controlled when the thing under test drifts, and
+the two tool declarations removed to bisect it were innocent and have been
+restored.
+
+#### Two genuine defects, found while chasing the wrong thing
+
+- **The diagnostics screen crashed on launch.** Adding a `Context` parameter to
+  `GeminiLiveVoiceProvider` broke it: an Activity constructs the provider as a
+  field initialiser, before its base context is attached, so
+  `getApplicationContext()` returned null and threw. `AudioManager` is now
+  resolved lazily, which makes the provider safe to construct wherever a caller
+  finds it convenient.
+- **The assistant had been reduced to a transcript.** R-20 recorded that the
+  prompt hardening left it repeating the user's words back, and then nothing was
+  done about it for three rounds of work while the product owner lived with it.
+  The restriction existed because the model had no way to *act*, so any offer of
+  help would have been a fabrication. With tools in place that is no longer
+  true, so the prompt now asks it to be useful and to call a function rather
+  than describe one. The safety bans — not the kiosk, cannot see the screen,
+  never claim a transaction state — are untouched.
+
+#### Also corrected
+
+R-21 claimed that `LiveAssistScenarioTest` passing was positive evidence that
+the detector finds the screen in rendered frames. Both that test and the motion
+experiment paint a full-white frame, so the inference was weaker than it was
+presented as, and it is withdrawn.
+
+#### The motion-experiment failure is not a regression
+
+`HandheldMotionExperimentTest` failed on target retention (28/30 against a 95%
+floor) while passing availability at 89% — better than the 86% in R-17. Five
+hypotheses about the cause were each ruled out by measurement: the coverage
+bound, the scenario test's evidence, detector cost (0.35 ms), an eagerly rebuilt
+scene, and a shared scratch buffer.
+
+The A/B that should have come first settled it: **the same test fails on the
+baseline commit `43399c7`**, in a clean worktree, on the same device, without
+any of this work. The gate is environment-sensitive — R-17 already noted 30/30
+standalone against 29/30 in a full-suite run — and the "0 failures" reported
+after the screen-space change was a lucky run stated with more confidence than
+it had earned.
+
+Eagerly rebuilding the scene on the detection timer was still worth fixing:
+`TargetTracker.corroborated` compares every label against every earlier one by
+string similarity, and running that every 220 ms put avoidable work on the
+thread that has to keep up with the camera. It is now cached when OCR finishes,
+which is the only moment the answer can change.
+
+---
+
 ### ADR-009 — The voice model has no authority over kiosk state, and is never told it
 
 **Status.** Proposed. Supersedes nothing; extends ADR-006 to the audio channel.
