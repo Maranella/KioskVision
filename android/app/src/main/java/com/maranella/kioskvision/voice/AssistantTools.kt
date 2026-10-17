@@ -31,6 +31,21 @@ enum class ToolOutcome {
     /** No kiosk screen is being tracked at all. */
     NoScreen,
 
+    /**
+     * A control was found, but nothing has started.
+     *
+     * The app has said what it found and is waiting to be told to go ahead. Nothing moves and
+     * nothing is pressed until the user says yes — which is the whole point for a person who
+     * cannot see what they are about to be sent towards.
+     */
+    NeedsConfirmation,
+
+    /** The user agreed; guidance has started. */
+    Confirmed,
+
+    /** There was nothing waiting to be confirmed. */
+    NothingPending,
+
     /** Guidance was stopped as asked. */
     Stopped,
 
@@ -62,6 +77,12 @@ interface AssistantActions {
     fun stopGuidance(): ToolOutcome
 
     fun readScreen(): ToolOutcome
+
+    /** The user agreed to be guided to whatever was last offered. */
+    fun confirmTarget(): ToolOutcome
+
+    /** The user declined it. The offer is dropped and nothing is guided to. */
+    fun cancelTarget(): ToolOutcome
 }
 
 /**
@@ -75,6 +96,8 @@ object AssistantTools {
     const val SELECT_TARGET = "select_target"
     const val STOP_GUIDANCE = "stop_guidance"
     const val READ_SCREEN = "read_screen"
+    const val CONFIRM_TARGET = "confirm_target"
+    const val CANCEL_TARGET = "cancel_target"
 
     const val QUERY_ARGUMENT = "query"
 
@@ -94,6 +117,8 @@ object AssistantTools {
 
             STOP_GUIDANCE -> actions.stopGuidance()
             READ_SCREEN -> actions.readScreen()
+            CONFIRM_TARGET -> actions.confirmTarget()
+            CANCEL_TARGET -> actions.cancelTarget()
 
             // Not a crash, and not silence: the model is told its request did nothing, which
             // is the truth and lets it say so.

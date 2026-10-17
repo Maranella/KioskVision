@@ -36,6 +36,13 @@ object SpokenMessageText {
         SpokenMessage.CannotReadText -> resources.getString(R.string.speak_cannot_read_text)
         SpokenMessage.TargetPositionLost -> resources.getString(R.string.speak_target_position_lost)
         SpokenMessage.ScreenNotTracked -> resources.getString(R.string.speak_screen_not_tracked)
+        is SpokenMessage.TargetOffered -> resources.getString(
+            if (message.isCritical) R.string.speak_target_offered_critical else R.string.speak_target_offered,
+            message.label,
+        )
+        is SpokenMessage.GoalSuggestion ->
+            resources.getString(R.string.speak_goal_suggestion, message.label)
+        SpokenMessage.GoalNoMatchHere -> resources.getString(R.string.speak_goal_no_match)
         SpokenMessage.ReadingScreen -> resources.getString(R.string.speak_reading_screen)
         SpokenMessage.HoldStill -> resources.getString(R.string.speak_hold_still)
         SpokenMessage.GuidanceStopped -> resources.getString(R.string.speak_guidance_stopped)

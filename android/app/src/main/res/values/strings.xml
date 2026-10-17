@@ -89,4 +89,8 @@
     <string name="assistant_consent_body">The assistant understands free Georgian speech, so what you say is sent to Google to be understood. Camera images, the text read from the kiosk screen and your finger position never leave this phone.\n\nWithout it the app still works: it recognises short spoken commands on the phone itself, reads the screen and guides your finger. You can change this later.</string>
     <string name="assistant_consent_accept">Use the assistant</string>
     <string name="assistant_consent_decline">Keep everything on this phone</string>
+    <string name="speak_target_offered">I have found %1$s. Shall I guide your finger to it?</string>
+    <string name="speak_target_offered_critical">I have found %1$s. This one moves money, so tell me whether to guide you to it.</string>
+    <string name="speak_goal_suggestion">On this screen I can see %1$s. Shall I guide you to it?</string>
+    <string name="speak_goal_no_match">Nothing on this screen matches what you asked for. Tell me what you need.</string>
 </resources>

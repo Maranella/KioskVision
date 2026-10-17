@@ -9,6 +9,8 @@ import com.maranella.kioskvision.assist.AssistCommand
 import com.maranella.kioskvision.assist.CommandParser
 import com.maranella.kioskvision.assist.RecognitionFailure
 import com.maranella.kioskvision.assist.ResolutionFailure
+import com.maranella.kioskvision.assist.ResolvedTarget
+import com.maranella.kioskvision.assist.TaskGoal
 import com.maranella.kioskvision.assist.TargetResolution
 import com.maranella.kioskvision.assist.TargetResolver
 import com.maranella.kioskvision.assist.UserIntent
@@ -183,6 +185,13 @@ class LiveAssistViewModel(application: Application) :
 
     /** Until when the assistant stays quiet because the app is speaking the substance. */
     private var suppressAssistantUntilMs = Long.MIN_VALUE / 2
+
+    /** A target that has been offered and is waiting for the user to agree (M6). */
+    private var pendingTarget: ResolvedTarget? = null
+    private var pendingQuery: String? = null
+
+    /** What the user is trying to do, carried across screens (M5). */
+    private var goal: TaskGoal? = null
 
     /** Outlives [viewModelScope] only long enough to release the microphone and the socket. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -525,7 +534,7 @@ class LiveAssistViewModel(application: Application) :
     override fun selectTarget(query: String): ToolOutcome {
         val scene = pipeline.latestScene
         val outcome = when (val resolution = targetResolver.resolve(UserIntent(query), scene, elapsedNow())) {
-            is TargetResolution.Resolved -> ToolOutcome.Guiding
+            is TargetResolution.Resolved -> offerTarget(query, resolution.target)
             is TargetResolution.Ambiguous -> ToolOutcome.Ambiguous
             is TargetResolution.Unresolved -> when (resolution.reason) {
                 ResolutionFailure.NoScreen -> ToolOutcome.NoScreen
@@ -544,17 +553,55 @@ class LiveAssistViewModel(application: Application) :
         // Unconfirmed is included deliberately: the pipeline holds such a request open for
         // several seconds while it looks for a better frame (R-12), which is a far more
         // useful answer than dropping it. Only a label that is genuinely absent is refused
-        // outright.
-        if (outcome == ToolOutcome.Guiding ||
-            outcome == ToolOutcome.Ambiguous ||
-            outcome == ToolOutcome.Unconfirmed
-        ) {
+        // outright. A confirmed target starts guidance in confirmTarget, not here.
+        if (outcome == ToolOutcome.Ambiguous || outcome == ToolOutcome.Unconfirmed) {
             pipeline.selectTarget(listOf(query))
         }
         return outcome
     }
 
+    /**
+     * Offers a resolved target and waits to be told to go ahead.
+     *
+     * Nothing is guided to until the user agrees. They cannot see what they are about to be
+     * sent towards, and on a payment terminal the difference between the button they meant
+     * and one that reads like it is money — so the app says what it found and stops.
+     */
+    private fun offerTarget(query: String, target: ResolvedTarget): ToolOutcome {
+        pendingTarget = target
+        pendingQuery = query
+        goal = (goal?.takeUnless { it.isExpired(elapsedNow()) } ?: TaskGoal(query, target.role, elapsedNow()))
+            .copy(query = query, role = target.role)
+        say(SpokenMessage.TargetOffered(target.label, target.isCritical))
+        return ToolOutcome.NeedsConfirmation
+    }
+
+    override fun confirmTarget(): ToolOutcome {
+        val target = pendingTarget ?: return ToolOutcome.NothingPending
+        val query = pendingQuery ?: target.label
+        pendingTarget = null
+        pendingQuery = null
+        goal = goal?.withVisited(target.label)
+        pipeline.selectTarget(listOf(query, target.label).distinct())
+        return ToolOutcome.Confirmed
+    }
+
+    override fun cancelTarget(): ToolOutcome {
+        if (pendingTarget == null) return ToolOutcome.NothingPending
+        pendingTarget = null
+        pendingQuery = null
+        // The offer was wrong, so the goal that produced it is wrong too. Keeping it would
+        // make the app volunteer the same suggestion on the next screen.
+        goal = null
+        return ToolOutcome.Stopped
+    }
+
     override fun stopGuidance(): ToolOutcome {
+        // Stopping is the user withdrawing from the task, not pausing it. A goal that
+        // survived would start making suggestions again on the next screen.
+        goal = null
+        pendingTarget = null
+        pendingQuery = null
         pipeline.submit(AssistCommand.Stop)
         return ToolOutcome.Stopped
     }
@@ -596,6 +643,9 @@ class LiveAssistViewModel(application: Application) :
      * and it is dispatched on the main thread rather than the SDK's.
      */
     fun onStopPressed() {
+        goal = null
+        pendingTarget = null
+        pendingQuery = null
         cancelListening()
         pipeline.submit(AssistCommand.Stop)
     }
@@ -622,7 +672,48 @@ class LiveAssistViewModel(application: Application) :
         // A new target, or a new screen, makes the previous sentence stale rather than
         // repetitive: it must not be suppressed as a duplicate.
         if (snapshot.targetLabel != _state.value.session.targetLabel) audioOutput.onContextChanged()
+        val wasPhase = _state.value.session.phase
         _state.update { it.copy(session = snapshot) }
+
+        // A screen the kiosk has just advanced to. This is the moment the goal earns its
+        // keep: without it the user would have to state the whole request again on every
+        // screen of a payment.
+        if (wasPhase != AssistancePhase.ScreenReady && snapshot.phase == AssistancePhase.ScreenReady) {
+            offerGoalOnNewScreen()
+        }
+    }
+
+    /**
+     * Re-runs the active goal against the screen that has just appeared.
+     *
+     * It matches the user's own words again rather than following a script: the app does not
+     * know this kiosk's flow and must not invent one. Finding nothing is said plainly instead
+     * of guessing at a next step.
+     */
+    private fun offerGoalOnNewScreen() {
+        val now = elapsedNow()
+        val active = goal?.takeUnless { it.isExpired(now) } ?: run { goal = null; return }
+        if (pendingTarget != null) return
+
+        val scene = pipeline.latestScene
+        when (val resolution = targetResolver.resolve(UserIntent(active.query, active.role), scene, now)) {
+            is TargetResolution.Resolved -> {
+                // The button just pressed is often still on screen as the kiosk redraws;
+                // offering it again would send the user back where they came from.
+                if (active.hasVisited(resolution.target.label)) return
+                pendingTarget = resolution.target
+                pendingQuery = active.query
+                say(SpokenMessage.GoalSuggestion(resolution.target.label))
+            }
+
+            is TargetResolution.Ambiguous -> Unit
+            is TargetResolution.Unresolved -> when (resolution.reason) {
+                // Nothing here matches, and the user is mid-task: say so rather than leave
+                // them waiting for an app that has quietly given up.
+                ResolutionFailure.NoSimilarLabel -> say(SpokenMessage.GoalNoMatchHere)
+                else -> Unit
+            }
+        }
     }
 
     override fun onDebugFrame(frame: DebugFrame) {

@@ -138,6 +138,10 @@ class AudioOutputCoordinator {
         SpokenMessage.GuidanceStopped -> true
         SpokenMessage.HoldStill -> true
         is SpokenMessage.TargetSelected -> true
+        // A question the user has to answer before anything moves; nothing may talk over it.
+        is SpokenMessage.TargetOffered -> true
+        is SpokenMessage.GoalSuggestion -> true
+        SpokenMessage.GoalNoMatchHere -> false
 
         // Everything else is description or explanation. The user can ask again.
         is SpokenMessage.ScreenContents -> false

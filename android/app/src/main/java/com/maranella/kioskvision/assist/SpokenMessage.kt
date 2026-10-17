@@ -7,6 +7,20 @@ package com.maranella.kioskvision.assist
 sealed interface SpokenMessage {
     data class Direction(val direction: GuidanceDirection) : SpokenMessage
     data class TargetSelected(val label: String, val isCritical: Boolean) : SpokenMessage
+
+    /**
+     * A control was found and the user is being asked whether to go ahead.
+     *
+     * Distinct from [TargetSelected], which announces a decision already taken. This one is a
+     * question, and nothing moves until it is answered.
+     */
+    data class TargetOffered(val label: String, val isCritical: Boolean) : SpokenMessage
+
+    /** A goal is still active and this screen has something that matches it. */
+    data class GoalSuggestion(val label: String) : SpokenMessage
+
+    /** The goal is still active but nothing on this screen matches it. */
+    data object GoalNoMatchHere : SpokenMessage
     data class TargetNotFound(val query: String) : SpokenMessage
     data class TargetAmbiguous(val first: String, val second: String) : SpokenMessage
     data class ScreenContents(val reading: ScreenReading) : SpokenMessage

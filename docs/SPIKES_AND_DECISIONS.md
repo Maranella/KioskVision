@@ -1581,6 +1581,64 @@ each outcome means and forbids promising to show anything unless the outcome was
 
 ---
 
+### R-26 — M5 and M6: a goal that survives a screen change, and nothing guided to unasked
+
+**Type:** implementation, 2026-10-17. **Unit-tested; not yet exercised at a kiosk.**
+
+`PROGRESS.md` listed goal retention across screens (M5) and critical-detail confirmation (M6)
+as the two things that *are* "complete an operation independently", and as absent. Both are
+now built, deliberately narrowly.
+
+#### M6 — a found control is offered, not acted on
+
+`selectTarget` no longer starts guidance. It resolves the target, says what it found and
+returns `needsconfirmation`; guidance begins only on `confirm_target`. Two tools were added,
+`confirm_target` and `cancel_target`.
+
+The reason is specific to this user. They cannot see what they are about to be sent towards,
+and on a payment terminal the difference between the button they meant and one that merely
+reads like it is money. `ResolvedTarget.isCritical` already travelled with the target, so a
+payment or confirmation button is offered in different words: „ეს თანხას ეხება — მითხარი,
+მიგიყვანო თუ არა."
+
+Declining clears the goal as well as the offer. A goal that survived a rejected suggestion
+would make the same wrong offer again on the next screen.
+
+#### M5 — the goal is the user's words, not a script
+
+`TaskGoal` holds the query, the role it was understood as, and the labels already guided to.
+When a new screen reaches `ScreenReady`, the goal is re-resolved against it:
+
+- resolved, and not already visited → offered („ამ ეკრანზე ვხედავ დენი. მიგიყვანო?")
+- nothing resembling it → said plainly („ამ ეკრანზე შენს თხოვნას ვერაფერი ემთხვევა.")
+
+**It does not know the kiosk's flow and never pretends to.** There is no table of steps and no
+inference that a subscriber number follows a payment button. All that persists is what the
+user said, re-matched against whatever appears. Finding nothing is reported rather than
+guessed around — which is the same rule the rest of the app follows, applied to a multi-screen
+task.
+
+Three things guard it against becoming a nuisance:
+
+- **Visited labels are not re-offered.** A kiosk often still shows the button just pressed
+  while it redraws, and offering it again would send the user back where they came from.
+- **Goals expire after five minutes.** Long enough for an unhurried payment; short enough that
+  an abandoned transaction does not start advising whoever picks the phone up next.
+- **Stop clears it.** Stopping is withdrawing from the task, not pausing it.
+
+#### What this does not amount to
+
+A full transaction still has not been performed, here or anywhere. The app can now carry a
+goal across screens and will not move a finger without being told to, but neither path has
+been exercised against a real kiosk, and the M6 acceptance criteria — reading back critical
+details such as an amount before confirmation — are only partly met: the control is named and
+its criticality stated, the amount on screen is not read back as part of the offer.
+
+234 unit tests pass. The sealed `SpokenMessage` forced every new message through the renderer
+and the audio coordinator, which is why adding them could not quietly skip either.
+
+---
+
 ### ADR-009 — The voice model has no authority over kiosk state, and is never told it
 
 **Status.** Proposed. Supersedes nothing; extends ADR-006 to the audio channel.

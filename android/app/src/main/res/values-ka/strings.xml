@@ -87,4 +87,8 @@
     <string name="assistant_consent_body">ასისტენტს თავისუფალი ქართული მეტყველება ესმის, ამიტომ ნათქვამი Google-ს ეგზავნება გასაგებად. კამერის სურათი, კიოსკის ეკრანიდან წაკითხული ტექსტი და შენი თითის მდებარეობა ამ ტელეფონს არასოდეს ტოვებს.\n\nმის გარეშეც აპი მუშაობს: მოკლე ხმოვან ბრძანებებს თავად ტელეფონში ცნობს, ეკრანს კითხულობს და თითს მიგიყვანს. ამის შეცვლა მოგვიანებითაც შეგიძლია.</string>
     <string name="assistant_consent_accept">ასისტენტის გამოყენება</string>
     <string name="assistant_consent_decline">ყველაფერი ამ ტელეფონში დარჩეს</string>
+    <string name="speak_target_offered">ვიპოვე %1$s. მიგიყვანო თითი?</string>
+    <string name="speak_target_offered_critical">ვიპოვე %1$s. ეს თანხას ეხება — მითხარი, მიგიყვანო თუ არა.</string>
+    <string name="speak_goal_suggestion">ამ ეკრანზე ვხედავ %1$s. მიგიყვანო?</string>
+    <string name="speak_goal_no_match">ამ ეკრანზე შენს თხოვნას ვერაფერი ემთხვევა. მითხარი, რა გჭირდება.</string>
 </resources>

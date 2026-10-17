@@ -34,6 +34,19 @@ class AssistantToolsTest {
             read = true
             return ToolOutcome.Reading
         }
+
+        var confirmed = false
+        var cancelled = false
+
+        override fun confirmTarget(): ToolOutcome {
+            confirmed = true
+            return ToolOutcome.Confirmed
+        }
+
+        override fun cancelTarget(): ToolOutcome {
+            cancelled = true
+            return ToolOutcome.Stopped
+        }
     }
 
     @Test
@@ -113,6 +126,21 @@ class AssistantToolsTest {
     }
 
     @Test
+    fun `confirmation and cancellation reach the app`() {
+        val actions = Recording()
+        assertEquals(
+            ToolOutcome.Confirmed,
+            AssistantTools.dispatch(AssistantTools.CONFIRM_TARGET, emptyMap(), actions),
+        )
+        assertEquals(
+            ToolOutcome.Stopped,
+            AssistantTools.dispatch(AssistantTools.CANCEL_TARGET, emptyMap(), actions),
+        )
+        assertTrue(actions.confirmed)
+        assertTrue(actions.cancelled)
+    }
+
+    @Test
     fun `the outcome sent back names no screen content`() {
         // The full vocabulary the model can ever learn from a tool call. If a future outcome
         // carried a label or a position, it would show up here.
@@ -120,7 +148,8 @@ class AssistantToolsTest {
         assertEquals(
             listOf(
                 "guiding", "notonscreen", "unconfirmed", "ambiguous",
-                "screennotreadable", "noscreen", "stopped", "reading",
+                "screennotreadable", "noscreen", "needsconfirmation", "confirmed",
+                "nothingpending", "stopped", "reading",
             ),
             wire,
         )

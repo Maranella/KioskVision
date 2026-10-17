@@ -30,6 +30,18 @@ object AssistantToolSchema {
                 ),
             ),
             FunctionDeclaration(
+                name = AssistantTools.CONFIRM_TARGET,
+                description = "The user agreed to be guided to the control you last offered. " +
+                    "Call this when they say yes, correct, go ahead, or similar.",
+                parameters = emptyMap(),
+            ),
+            FunctionDeclaration(
+                name = AssistantTools.CANCEL_TARGET,
+                description = "The user declined the control you last offered. Call this when " +
+                    "they say no, not that one, or something else.",
+                parameters = emptyMap(),
+            ),
+            FunctionDeclaration(
                 name = AssistantTools.STOP_GUIDANCE,
                 description = "Stop guiding the finger. Call this when the user asks you to stop.",
                 parameters = emptyMap(),
@@ -92,6 +104,10 @@ object AssistantPrompt {
         append("phone steady for a moment; ")
         append("'ambiguous' — there are several, the app is asking which one, so say nothing ")
         append("more; ")
+        append("'needsconfirmation' — the app found it and has ASKED THE USER whether to go ")
+        append("ahead; say nothing, wait for their answer, then call confirm_target or ")
+        append("cancel_target; ")
+        append("'confirmed' — guidance has started, tell them to follow the directions; ")
         append("'reading' — the app is reading the screen aloud right now, so SAY NOTHING ")
         append("and do not announce it; ")
         append("'screennotreadable' — ask them to move a little closer; ")
