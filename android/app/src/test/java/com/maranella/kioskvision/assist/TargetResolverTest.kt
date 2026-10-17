@@ -201,3 +201,53 @@ class TargetResolverTest {
         assertEquals(SceneReadability.Unreadable, built.readability)
     }
 }
+
+/**
+ * What the app is willing to read aloud.
+ *
+ * A screen reading that opens with invented syllables is worse than one that starts late: the
+ * user cannot tell the noise from the kiosk, and the first thing they hear is the app being
+ * wrong.
+ */
+class ScreenReaderNoiseTest {
+
+    private fun block(text: String, confidence: Float, top: Float) = DetectedTextBlock(
+        text = text,
+        boundingBox = TextBox(10f, top, 200f, top + 30f),
+        confidence = confidence,
+    )
+
+    @Test
+    fun `two-letter fragments invented from noise are not read`() {
+        // Measured from a dark, text-free scene: OCR returned these at these confidences.
+        val reading = ScreenReader.read(
+            listOf(
+                block("He", 0.55f, 10f),
+                block("ae", 0.63f, 50f),
+                block("IC", 0.43f, 90f),
+                block("კომუნალური გადასახადი", 0.9f, 130f),
+            ),
+        )
+
+        assertEquals(listOf("კომუნალური გადასახადი"), reading.lines)
+        assertTrue("dropping them must be reported as uncertainty", reading.omittedUncertain)
+    }
+
+    @Test
+    fun `a short label read with real confidence is still read`() {
+        val reading = ScreenReader.read(listOf(block("OK", 0.95f, 10f)))
+        assertEquals(listOf("OK"), reading.lines)
+    }
+
+    @Test
+    fun `ordinary Georgian labels are unaffected`() {
+        val reading = ScreenReader.read(
+            listOf(
+                block("დენი", 0.7f, 10f),
+                block("გაზი", 0.7f, 50f),
+                block("წყალი", 0.7f, 90f),
+            ),
+        )
+        assertEquals(listOf("დენი", "გაზი", "წყალი"), reading.lines)
+    }
+}

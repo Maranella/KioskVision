@@ -92,6 +92,8 @@ object AssistantPrompt {
         append("phone steady for a moment; ")
         append("'ambiguous' — there are several, the app is asking which one, so say nothing ")
         append("more; ")
+        append("'reading' — the app is reading the screen aloud right now, so SAY NOTHING ")
+        append("and do not announce it; ")
         append("'screennotreadable' — ask them to move a little closer; ")
         append("'noscreen' — ask them to point the phone at the kiosk screen. ")
         append("NEVER say you will show or find something when the outcome was not 'guiding'. ")

@@ -16,6 +16,12 @@ object ScreenReader {
     /** Amounts and other numbers are only read when OCR is very sure of them. */
     private const val MIN_NUMERIC_CONFIDENCE = 0.8f
 
+    /** Below this many letters, a line needs [MIN_SHORT_WORD_CONFIDENCE] to be read. */
+    private const val MIN_LETTERS_TO_READ = 3
+
+    /** What a two-letter line must score to be believed. */
+    private const val MIN_SHORT_WORD_CONFIDENCE = 0.85f
+
     private val sensitiveContext = listOf("pin", "პინ", "კოდ", "პაროლ", "password", "code")
     private val maskedOrDigitsOnly = Regex("^[\\d\\s*•●·xX-]{3,}$")
 
@@ -28,6 +34,14 @@ object ScreenReader {
             when {
                 // On PIN/code screens, never read digit or masked fields aloud.
                 sensitiveScreen && maskedOrDigitsOnly.matches(text) -> false
+                // Two-letter fragments are what OCR invents from noise: a dark scene produced
+                // "He", "ae", "as", "IC", "oe" at 0.55-0.63 confidence, which passed the old
+                // gate and were read aloud before the real labels. A genuine kiosk label is
+                // longer than that, so a short one has to be read very confidently to earn
+                // its place — which keeps a clear "OK" and drops the invented pairs.
+                TextNormalizer.letterCount(text) < MIN_LETTERS_TO_READ &&
+                    !hasDigits &&
+                    block.confidence < MIN_SHORT_WORD_CONFIDENCE -> { omitted = true; false }
                 TextNormalizer.letterCount(text) < 2 && !hasDigits -> false
                 block.confidence < MIN_CONFIDENCE -> { omitted = true; false }
                 hasDigits && block.confidence < MIN_NUMERIC_CONFIDENCE -> { omitted = true; false }

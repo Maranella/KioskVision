@@ -181,6 +181,9 @@ class LiveAssistViewModel(application: Application) :
     /** When a directional cue was last spoken; conversation yields for a moment after one. */
     private var lastDirectionSpokenMs = Long.MIN_VALUE / 2
 
+    /** Until when the assistant stays quiet because the app is speaking the substance. */
+    private var suppressAssistantUntilMs = Long.MIN_VALUE / 2
+
     /** Outlives [viewModelScope] only long enough to release the microphone and the socket. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val speech = GuidanceSpeechOutput(application) { status ->
@@ -468,6 +471,11 @@ class LiveAssistViewModel(application: Application) :
         // given. Suppressing on the phase alone silenced the one sentence that tells the user
         // guidance has begun — "move your finger and follow the directions" — so the assistant
         // went quiet at the exact moment it had succeeded.
+        if (elapsedNow() < suppressAssistantUntilMs) {
+            // The app is saying the substance; a commentary on top would cut it short.
+            if (pipeline.diagnosticsEnabled) Log.i(TAG, "speak: suppressed, the app is reading")
+            return
+        }
         val sinceDirection = elapsedNow() - lastDirectionSpokenMs
         if (sinceDirection < DIRECTION_HOLDS_VOICE_MS) {
             if (pipeline.diagnosticsEnabled) {
@@ -552,6 +560,11 @@ class LiveAssistViewModel(application: Application) :
     }
 
     override fun readScreen(): ToolOutcome {
+        // The app itself is about to read the screen aloud, which takes seconds. The
+        // assistant's acknowledgement arrives in the middle of it and speaks with
+        // QUEUE_FLUSH, cutting off the very reading it is announcing — the user heard
+        // "the app will read the screen" and then nothing.
+        suppressAssistantUntilMs = elapsedNow() + APP_SPEAKS_WINDOW_MS
         pipeline.submit(AssistCommand.ReadScreen)
         return ToolOutcome.Reading
     }
@@ -688,5 +701,11 @@ class LiveAssistViewModel(application: Application) :
          * still answered.
          */
         const val DIRECTION_HOLDS_VOICE_MS = 3_000L
+
+        /**
+         * How long the app owns the voice after a command whose answer it speaks itself.
+         * Long enough to cover reading a screen of labels aloud.
+         */
+        const val APP_SPEAKS_WINDOW_MS = 20_000L
     }
 }
