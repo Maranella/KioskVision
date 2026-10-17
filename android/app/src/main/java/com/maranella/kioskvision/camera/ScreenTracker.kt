@@ -15,6 +15,14 @@ data class TrackedScreen(
     val confidence: Float,
     val stable: Boolean,
     val ageMs: Long,
+    /**
+     * Increments whenever the track restarts rather than continues.
+     *
+     * Two results computed against different versions describe different screens, or the same
+     * screen from an incompatible viewpoint, and must never be combined: an OCR box anchored
+     * under one version means nothing under the next.
+     */
+    val version: Long = 0L,
 ) {
     /** Frame pixels to the unit square. Null when the quadrilateral is degenerate. */
     val toScreenSpace: Homography? by lazy { Homography.quadToUnitSquare(quad) }
@@ -55,6 +63,7 @@ class ScreenTracker(
     private var lastAcceptedAtMs: Long = 0L
     private var consecutiveAccepted: Int = 0
     private var everDetected: Boolean = false
+    private var version: Long = 0L
 
     /**
      * Feeds one detection attempt. A null [candidate] means the detector looked and found
@@ -74,6 +83,8 @@ class ScreenTracker(
             // the track restarts instead and reports itself unstable until it settles.
             smoothed = candidate.quad
             consecutiveAccepted = 1
+            // A restart is a new geometry: anything anchored against the old one is void.
+            version++
         } else {
             smoothed = blend(previous, candidate.quad, SMOOTHING)
             consecutiveAccepted++
@@ -95,6 +106,7 @@ class ScreenTracker(
             confidence = confidence,
             stable = consecutiveAccepted >= STABLE_RUN,
             ageMs = age,
+            version = version,
         )
     }
 
@@ -118,6 +130,7 @@ class ScreenTracker(
         lastAcceptedAtMs = 0L
         consecutiveAccepted = 0
         everDetected = false
+        version++
     }
 
     /** True once the track has been confirmed enough times to be worth guiding from. */

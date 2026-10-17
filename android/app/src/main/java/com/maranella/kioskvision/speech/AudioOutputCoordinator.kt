@@ -37,18 +37,77 @@ sealed interface SpeechDecision {
  */
 class AudioOutputCoordinator {
 
-    private var modelSpeaking = false
+    private var lastModelChunkMs = Long.MIN_VALUE / 2
 
-    fun onModelSpeaking(speaking: Boolean) {
-        modelSpeaking = speaking
+    /**
+     * Called whenever a chunk of the model's own transcript arrives.
+     *
+     * Only the arrival of a chunk is trusted, never its absence. The earlier version also
+     * cleared the flag — on any user transcript chunk, which interleaves with the model's —
+     * so the app believed the assistant had stopped mid-sentence and spoke over it. Playback
+     * also outlasts the transcript: the SDK keeps rendering audio after the last chunk, so a
+     * flag that goes false with the text is false while a voice is still talking.
+     *
+     * There is no signal for "audio is currently playing": the SDK owns the AudioTrack. This
+     * is a hold timer over the one event that is real, which is a proxy and is treated as one.
+     */
+    fun onModelChunk(nowMs: Long) {
+        lastModelChunkMs = nowMs
     }
 
-    val isModelSpeaking: Boolean get() = modelSpeaking
+    /** Clears the hold at once, for a session that has stopped. */
+    fun onModelSilent() {
+        lastModelChunkMs = Long.MIN_VALUE / 2
+    }
 
-    fun decide(message: SpokenMessage): SpeechDecision = when {
-        !modelSpeaking -> SpeechDecision.SpeakNow
-        isUrgent(message) -> SpeechDecision.PreemptModel
-        else -> SpeechDecision.Drop
+    fun isModelSpeaking(nowMs: Long): Boolean = nowMs - lastModelChunkMs < SPEAKING_HOLD_MS
+
+    private var lastSpoken: SpokenMessage? = null
+    private var lastSpokenAtMs = Long.MIN_VALUE / 2
+
+    /**
+     * @param userRequested true when the user asked for this out loud, by pressing Repeat.
+     *   An explicit request is always honoured: it is never deduplicated and never yields to
+     *   the assistant, because the user asking twice means they did not hear it the first time.
+     */
+    fun decide(message: SpokenMessage, nowMs: Long, userRequested: Boolean = false): SpeechDecision {
+        if (userRequested) return record(message, nowMs, SpeechDecision.PreemptModel)
+
+        // The same sentence repeated within a few seconds tells the user nothing and crowds
+        // out whatever else needs saying. Directions are exempt: repetition is how a finger
+        // gets steered, and GuidanceAnnouncer already owns their cadence.
+        if (message !is SpokenMessage.Direction &&
+            message == lastSpoken &&
+            nowMs - lastSpokenAtMs < REPEAT_SUPPRESSION_MS
+        ) {
+            return SpeechDecision.Drop
+        }
+
+        val decision = when {
+            !isModelSpeaking(nowMs) -> SpeechDecision.SpeakNow
+            isUrgent(message) -> SpeechDecision.PreemptModel
+            else -> SpeechDecision.Drop
+        }
+        return record(message, nowMs, decision)
+    }
+
+    private fun record(message: SpokenMessage, nowMs: Long, decision: SpeechDecision): SpeechDecision {
+        if (decision != SpeechDecision.Drop) {
+            lastSpoken = message
+            lastSpokenAtMs = nowMs
+        }
+        return decision
+    }
+
+    /**
+     * Forgets what was last said, so the next message is never suppressed as a repeat.
+     *
+     * Called when the target or the screen changes: the same sentence means something
+     * different once the thing it refers to has moved on.
+     */
+    fun onContextChanged() {
+        lastSpoken = null
+        lastSpokenAtMs = Long.MIN_VALUE / 2
     }
 
     /**
@@ -59,6 +118,19 @@ class AudioOutputCoordinator {
      * the user reaching towards a position the app no longer stands behind, which is the one
      * outcome the safety invariants exist to prevent.
      */
+    private companion object {
+        /**
+         * How long after the last transcript chunk the assistant is still assumed to be
+         * speaking. Long enough to cover the gap between chunks and the playback that trails
+         * the final one; short enough that a genuinely finished reply does not keep guidance
+         * silent while the user's finger is moving.
+         */
+        const val SPEAKING_HOLD_MS = 2_000L
+
+        /** How long an identical non-directional message stays suppressed. */
+        const val REPEAT_SUPPRESSION_MS = 4_000L
+    }
+
     private fun isUrgent(message: SpokenMessage): Boolean = when (message) {
         is SpokenMessage.Direction -> true
         SpokenMessage.TargetPositionLost -> true

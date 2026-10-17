@@ -46,8 +46,37 @@ internal fun DebugOverlay(frame: DebugFrame?, modifier: Modifier = Modifier) {
                     drawLine(Color.Magenta, map(tip.x, tip.y), center, strokeWidth = 5f)
                 }
             }
+            // The whole hand, so "MediaPipe is not running" and "it runs and sees nothing"
+            // stop looking the same. Twenty-one points landing on a real hand is the proof a
+            // missing fingertip cannot give.
+            frame.handLandmarks?.forEach { (x, y) ->
+                drawCircle(Color(0xFF80DEEA), radius = 5f, center = map(x, y))
+            }
             frame.fingertipRaw?.let { drawCircle(Color.Red, radius = 10f, center = map(it.x, it.y), style = Stroke(3f)) }
             frame.fingertipSmoothed?.let { drawCircle(Color.Cyan, radius = 16f, center = map(it.x, it.y)) }
+
+            // The detected kiosk screen. Without it drawn, there is no way to tell a screen
+            // that was never found from one found in the wrong place.
+            frame.screenQuad?.let { quad ->
+                val corners = quad.corners.map { map(it.x, it.y) }
+                val edge = if (frame.screenStable) Color(0xFF4FC3F7) else Color(0xFF9E9E9E)
+                for (i in corners.indices) {
+                    drawLine(edge, corners[i], corners[(i + 1) % corners.size], strokeWidth = 4f)
+                }
+                // Marks the corner the transform treats as the screen's top-left: a corner
+                // ordering bug looks like a plausible quadrilateral until this moves.
+                drawCircle(edge, radius = 9f, center = corners[0])
+            }
+
+            // What guidance actually reasoned about, mapped back through the same homography.
+            // Coincides with the raw box when the geometry is sound; separates visibly when it
+            // is not. Drawn last so it sits on top of the box it is being compared against.
+            frame.guidanceTargetBox?.let { box ->
+                drawBox(box, frame.frame, map, Color(0xFFE040FB), width = 3f)
+            }
+            frame.guidanceFingertip?.let {
+                drawCircle(Color(0xFFE040FB), radius = 7f, center = map(it.x, it.y), style = Stroke(3f))
+            }
         }
         Text(
             text = frame.describe(),
@@ -75,13 +104,45 @@ private fun DrawScope.drawBox(
 
 private fun DebugFrame.describe(): String = buildString {
     appendLine("phase $phase")
-    appendLine("frame ${frame.width}×${frame.height}px  hand ${handMs}ms")
+    appendLine(
+        String.format(
+            Locale.ROOT,
+            "frame #%d %d×%dpx  hand %dms  brightness %.0f%s",
+            frameId, frame.width, frame.height, handMs, frameLuminance,
+            if (frameLuminance in 0f..25f) "  ← BLACK IMAGE" else "",
+        ),
+    )
+    appendLine(
+        if (screenQuad == null) {
+            "screen NOT TRACKED — no precise directions"
+        } else {
+            String.format(
+                Locale.ROOT,
+                "screen conf %.2f  %s  age %dms  geom v%d",
+                screenConfidence,
+                if (screenStable) "stable" else "settling",
+                screenAgeMs ?: -1L,
+                geometryVersion,
+            )
+        },
+    )
+    // The error vector guidance is acting on, in units of the on-target zone. Printed because
+    // the drawn line shows direction but not how close "close" actually is.
+    if (zoneOffsetX != null && zoneOffsetY != null) {
+        appendLine(
+            String.format(Locale.ROOT, "error  x %+.2f  y %+.2f  (zone units)", zoneOffsetX, zoneOffsetY),
+        )
+    }
     appendLine(
         "ocr ${if (ocrRunning) "RUNNING" else "idle"}  last ${ocrMs}ms" +
             (sinceLastOcrMs?.let { "  ${it}ms ago" } ?: "  never") +
             "  jobs $ocrJobsStarted",
     )
     appendLine("anchor ${anchorMs}ms  jobs $anchorJobsStarted  blur-skips $blurSkips")
+    appendLine(
+        "hand " + (if (handsSeen > 0) "${handsSeen}/${handInferences} seen" else "NEVER SEEN in $handInferences") +
+            "  ${handMs}ms" + (handMiss?.let { "  miss: $it" } ?: "  tip ok"),
+    )
     appendLine("lines ${blocks.size}  steady $deviceSteady${if (!gyroscopeAvailable) " (no gyro)" else ""}")
     appendLine(
         "change ${if (screenChangeSuspected) "SUSPECTED" else "no"}" +

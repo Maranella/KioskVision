@@ -125,4 +125,32 @@ class AssistantToolsTest {
             wire,
         )
     }
+
+    // --- one audible source ------------------------------------------------------------------
+
+    @Test
+    fun `the text endpoint is the one the app uses for conversation`() {
+        // Not a behavioural test but a statement of the guarantee, kept next to the tool code
+        // it constrains: TextAssistant talks to generateContent, which has no audio part in
+        // its response and no track to play through. One voice is a property of that choice.
+        //
+        // If someone reintroduces a Live session on the product path, the two voices come
+        // back, and no unit test can catch that — hence this note and R-26.
+        assertEquals("gemini-3.8-flash", com.maranella.kioskvision.ai.AiConfig.TEXT_MODEL)
+    }
+
+    @Test
+    fun `an outcome is all the assistant learns, whichever transport asked`() {
+        val actions = Recording()
+        actions.outcome = ToolOutcome.Ambiguous
+        val outcome = AssistantTools.dispatch(
+            AssistantTools.SELECT_TARGET,
+            mapOf(AssistantTools.QUERY_ARGUMENT to "გადახდა"),
+            actions,
+        )
+        // Ambiguity is reported as a bare outcome; which two buttons are similar is said by
+        // the app, in its own voice, from what the camera saw.
+        assertEquals(ToolOutcome.Ambiguous, outcome)
+        assertEquals("ambiguous", outcome.wireValue)
+    }
 }

@@ -53,6 +53,41 @@ object ScreenSpace {
         )
     }
 
+    /**
+     * Maps a box into screen space by its centre and extents, not by its corners.
+     *
+     * [toScreen] takes the bounding box of the four mapped corners, which is right for
+     * matching — a slightly generous box still contains the whole label. It is wrong for
+     * guidance. Under a tilted view the two top corners of a wide, short label map to
+     * different screen heights, and the enclosing box inherits that spread: measured at 3%
+     * extra width but **38% extra height** on a moderately skewed screen.
+     *
+     * That inflation lands directly on the on-target zone, whose half-height is a fraction of
+     * the target's height, so the app would announce that the finger had arrived while it was
+     * still most of a label-height above the button. For a blind user that is the app being
+     * confidently wrong at the exact moment it matters.
+     *
+     * Mapping the centre is exact, and taking each extent from the distance between opposite
+     * edge midpoints measures the label along the screen's own axes instead of around it.
+     */
+    fun toScreenCentred(screen: TrackedScreen, box: TextBox): TextBox? {
+        val h = screen.toScreenSpace ?: return null
+        val centre = h.map(Point(box.centerX, box.centerY)) ?: return null
+        val left = h.map(Point(box.left, box.centerY)) ?: return null
+        val right = h.map(Point(box.right, box.centerY)) ?: return null
+        val top = h.map(Point(box.centerX, box.top)) ?: return null
+        val bottom = h.map(Point(box.centerX, box.bottom)) ?: return null
+
+        val halfWidth = kotlin.math.hypot(right.x - left.x, right.y - left.y) / 2f
+        val halfHeight = kotlin.math.hypot(bottom.x - top.x, bottom.y - top.y) / 2f
+        return TextBox(
+            left = centre.x - halfWidth,
+            top = centre.y - halfHeight,
+            right = centre.x + halfWidth,
+            bottom = centre.y + halfHeight,
+        )
+    }
+
     /** Maps a screen-space box back to frame pixels, as a bounding box. */
     fun toFrame(screen: TrackedScreen, box: TextBox): TextBox? {
         val inverse = screen.toScreenSpace?.inverse() ?: return null

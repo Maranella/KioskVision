@@ -74,6 +74,26 @@ object AiConfig {
     )
 
     /**
+     * Whether the assistant's own voice is silenced and the app speaks for it.
+     *
+     * Two voices — the Live model's and the device's Georgian TTS — talk over each other, and
+     * the audio channel is the whole interface for a blind user. There is no reliable signal
+     * for when the SDK's playback is active (it owns the AudioTrack), so arbitrating the two
+     * by timing is guesswork.
+     *
+     * The obvious route — ask the model for TEXT instead of AUDIO so it has no speaker, and
+     * let the app speak everything — **was measured and does not work**. With
+     * `ResponseModality.TEXT`, `startAudioConversation` opens the microphone for 491 ms and
+     * stops, against continuous capture under AUDIO. It streams no audio, so there is nothing
+     * for the model to answer.
+     *
+     * Left here, off, so the next person does not spend the same hour rediscovering it. Single
+     * voice on this SDK needs the transport rewritten: an AudioRecord the app owns,
+     * `sendAudioRealtime`, and `receive()` for the text — not a configuration change.
+     */
+    const val SINGLE_VOICE = false
+
+    /**
      * Documented Live API session limits, used to drive rollover rather than discovered by
      * being disconnected. Audio-only sessions last ~15 min; a single connection ~10 min, with
      * a "going away" signal about 60 s before it ends.

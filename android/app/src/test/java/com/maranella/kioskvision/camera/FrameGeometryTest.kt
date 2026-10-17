@@ -2,6 +2,7 @@ package com.maranella.kioskvision.camera
 
 import com.maranella.kioskvision.assist.FrameSize
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FrameGeometryTest {
@@ -57,5 +58,87 @@ class FrameGeometryTest {
         val (x, y) = FrameGeometry.frameToView(0f, 0f, FrameSize(400, 300), 300f, 300f)
         assertEquals(-50f, x, 0.001f)
         assertEquals(0f, y, 0.001f)
+    }
+
+    // --- the whole chain, which is what guidance actually depends on ----------------------
+
+    @Test
+    fun `the rear camera is never mirrored`() {
+        // A mirrored preview would reverse left and right in every spoken direction, and the
+        // user has no way to notice they are being sent the wrong way. Two points differing
+        // only in x must keep their order through every rotation.
+        for (rotation in listOf(0, 90, 180, 270)) {
+            val t = FrameGeometry.cropToFrame(w, h, rotation)
+            val left = t.map(10f, 360f)
+            val right = t.map(1270f, 360f)
+            val moved = when (rotation) {
+                0 -> left.first < right.first
+                180 -> left.first > right.first          // a half turn reverses x, as it must
+                else -> left.second != right.second      // a quarter turn sends x into y
+            }
+            assertTrue("rotation $rotation mapped x unexpectedly", moved)
+        }
+    }
+
+    @Test
+    fun `a 90 degree rotation sends the x axis to y and not to x`() {
+        // The specific failure this guards: a transform that swaps the axes twice, or not at
+        // all, still keeps points inside the frame and passes a bounds check.
+        val t = FrameGeometry.cropToFrame(w, h, 90)
+        val a = t.map(0f, 0f)
+        val b = t.map(1280f, 0f)
+        assertEquals("x must not survive as x under a quarter turn", a.first, b.first, 0.001f)
+        assertTrue("x must become y", kotlin.math.abs(a.second - b.second) > 1000f)
+    }
+
+    @Test
+    fun `a fingertip and a label at the same place coincide in screen space`() {
+        // Hand landmarks and OCR boxes both arrive in upright frame pixels, so the thing that
+        // must hold is that one shared transform carries both into screen space. If either
+        // ever gained its own conversion, this is where the two would drift apart.
+        val screen = TrackedScreen(
+            quad = Quad(
+                Point(120f, 90f), Point(520f, 130f),
+                Point(560f, 470f), Point(80f, 430f),
+            ),
+            confidence = 0.9f,
+            stable = true,
+            ageMs = 20L,
+        )
+        val samePlaceInFrame = Point(300f, 280f)
+
+        val asFingertip = ScreenSpace.toScreen(screen, samePlaceInFrame)!!
+        val asLabelBox = ScreenSpace.toScreen(
+            screen,
+            com.maranella.kioskvision.assist.TextBox(
+                samePlaceInFrame.x - 1f, samePlaceInFrame.y - 1f,
+                samePlaceInFrame.x + 1f, samePlaceInFrame.y + 1f,
+            ),
+        )!!
+
+        assertEquals(asFingertip.x, asLabelBox.centerX, 0.01f)
+        assertEquals(asFingertip.y, asLabelBox.centerY, 0.01f)
+    }
+
+    @Test
+    fun `a degenerate view size does not produce non-finite coordinates`() {
+        val (x, y) = FrameGeometry.frameToView(
+            100f, 100f,
+            FrameSize(w, h),
+            viewWidth = 0f, viewHeight = 0f,
+        )
+        // A zero-sized view happens during layout. Guidance must not inherit a NaN from it.
+        assertTrue("x was $x", x.isFinite())
+        assertTrue("y was $y", y.isFinite())
+    }
+
+    @Test
+    fun `a rotation that is not a multiple of ninety is rejected rather than approximated`() {
+        try {
+            FrameGeometry.cropToFrame(w, h, 45)
+            org.junit.Assert.fail("expected a rejection")
+        } catch (expected: IllegalArgumentException) {
+            // Silently rounding would move every coordinate by an unknown amount.
+        }
     }
 }

@@ -1468,6 +1468,119 @@ which is the only moment the answer can change.
 
 ---
 
+### R-25 — One voice, and the four bugs between the model answering and the user hearing it
+
+**Type:** implementation + measurement, 2026-10-17. **Verified by ear on the device.**
+
+The product owner reported two voices, then an assistant that said "I will show you" and fell
+silent, then guidance that worked but never spoke. Four separate defects, each hidden behind
+the last.
+
+#### The transport: silence by not having a speaker
+
+`startAudioConversation` builds its own `AudioTrack`. The app can neither mute it nor observe
+it, so two voices could only be arbitrated by guessing (R-22, R-24).
+
+`ResponseModality.TEXT` looks like the fix and is not. Measured twice, through two different
+transports:
+
+| Transport | Modality | Microphone |
+|---|---|---|
+| `startAudioConversation` | TEXT | stopped after 491 ms |
+| Own `AudioRecord` | TEXT | stopped after 433 ms |
+| Own `AudioRecord` | **AUDIO** | **continuous** |
+
+The common factor was the modality, not the transport: the Live models are audio-native and
+close the channel when asked for text. `StreamingVoiceProvider` therefore keeps AUDIO, owns
+the microphone, and **never plays the audio** — it has no `AudioTrack` at all, and speaks the
+`outputTranscription` through the app's single engine. Silence by construction.
+
+It also removed the beeping: Android's `SpeechRecognizer` ends after about 800 ms of silence
+and plays the system tone on every restart, so looping it for hands-free use produced a beep a
+second and `error 7 -> NoMatch` on repeat.
+
+#### Then: dropped tool calls
+
+Owning the transport means owning everything the SDK was doing. `LiveServerToolCall` was not
+handled, so every tool call was dropped, no `FunctionResponse` was sent, and the model's turn
+completed with nothing in it — `SRV other: LiveServerToolCall` beside an empty reply. That was
+the "says nothing" symptom, and no unit test could have caught it: the dispatch was tested,
+the transport reading the message was not.
+
+#### Then: three places that silenced correct output
+
+Each made sense while "listening" meant holding a button, and each became fatal once listening
+was continuous and that flag was permanently true.
+
+| Where | Effect |
+|---|---|
+| `speakAssistant`'s `if (listening) return` | The assistant never spoke at all |
+| `say`'s `if (listening) return` | Every guidance message dropped |
+| `pipeline.speechMuted = true` for the session | `if (toSpeak != null && !speechMuted)` — **no direction was ever emitted** |
+
+The third is the one the owner described as "it does it correctly, it just doesn't say it":
+the guidance engine was computing directions and the pipeline was discarding them before they
+reached speech.
+
+A fourth, smaller: the model answers an utterance it cannot parse with a zero-width space,
+which `trim()` leaves and `isNotEmpty()` accepts, so the engine was handed a string containing
+no speech.
+
+#### Role arbitration, corrected
+
+"Directions win over conversation" was keyed on the *phase*, so the moment guidance started
+the assistant was muted — including the one sentence that tells the user guidance has begun.
+It is now keyed on a direction actually having been spoken, within 3 s.
+
+#### The half-duplex gate that the Live transport could never have
+
+Both sides are now the app's, so "are we making sound right now" comes from the engine's own
+`UtteranceProgressListener` rather than a timer. The microphone is paused around every
+utterance, measured as `dropped 94 while speaking` climbing while the app talks and `dropped 0`
+when it does not.
+
+Cost: during a run of directions the microphone is closed much of the time, so the user cannot
+interrupt. That is a real trade and is not yet tuned.
+
+#### What a working exchange looks like
+
+```
+HEARD: წამიკითხე, რა წერია ეკრანზე.
+TOOL  read_screen -> reading
+SAID: აპლიკაცია წაიკითხავს ეკრანის შინაარსს.
+speak#3: done, engineStarted=true
+```
+
+and, for a target that is genuinely absent:
+
+```
+HEARD: საგარეჯოს კომუნალური მომსახურება
+TOOL  select_target -> notonscreen
+SAID: ამ ეკრანზე ამ სერვისს ვერ ვპოულობ.
+```
+
+The model did not invent a button. The app checked with OCR, refused, and the assistant
+reported the refusal — ADR-009 holding in a live session rather than in a test.
+
+#### Outcomes had to be explained to the model
+
+The function response carries a bare code, and the model read every one optimistically:
+`unconfirmed` came back as "I will show you", followed by silence. The prompt now states what
+each outcome means and forbids promising to show anything unless the outcome was `guiding`.
+
+#### Still open
+
+- **Georgian recognition remains the weak link.** Across today's sessions: `cada día`,
+  `chef c'est bon`, `quadrat`, `comunale` — interleaved with perfectly correct Georgian. Same
+  picture as R-19 on a different transport, so the limitation is the model's, not the wiring's.
+- Whether `ScreenReader`'s output is actually spoken after `read_screen` is **unverified**;
+  the command dispatches, the reading itself has not been heard.
+- The end-to-end payment flow does not exist: goal retention across screens (M5) and
+  critical-detail readback with confirmation (M6) are not built. One step on one screen works
+  and must be re-asked for on the next.
+
+---
+
 ### ADR-009 — The voice model has no authority over kiosk state, and is never told it
 
 **Status.** Proposed. Supersedes nothing; extends ADR-006 to the audio channel.

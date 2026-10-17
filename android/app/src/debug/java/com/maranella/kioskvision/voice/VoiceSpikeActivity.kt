@@ -38,7 +38,31 @@ import kotlinx.coroutines.launch
  */
 class VoiceSpikeActivity : ComponentActivity() {
 
-    private val provider = GeminiLiveVoiceProvider(this)
+    /** Spoken output for the single-voice transport; the managed one speaks for itself. */
+    private val speech by lazy {
+        com.maranella.kioskvision.speech.GuidanceSpeechOutput(this) { }
+    }
+
+    private val managed by lazy { GeminiLiveVoiceProvider(this) }
+
+    /**
+     * The prototype transport: the app owns the microphone and speaks the model's text itself,
+     * so only one voice can ever be audible. Compared against [managed] on a real device,
+     * because that is the only place the question can be answered.
+     */
+    private val streaming by lazy {
+        StreamingVoiceProvider(
+            context = this,
+            onSpeak = { text -> speech.speakText(text) },
+            onCancelSpeech = { speech.stop() },
+        )
+    }
+
+    private val useStreamingState = androidx.compose.runtime.mutableStateOf(false)
+    private var useStreaming: Boolean
+        get() = useStreamingState.value
+        set(value) { useStreamingState.value = value }
+    private val provider: VoiceProvider get() = if (useStreaming) streaming else managed
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,6 +81,22 @@ class VoiceSpikeActivity : ComponentActivity() {
                 Text("Gemini Live — Georgian spike", fontSize = 22.sp)
                 Text("model: ${AiConfig.LIVE_MODEL}", fontSize = 13.sp, fontFamily = FontFamily.Monospace)
                 Text("language: ${AiConfig.SPOKEN_LANGUAGE}   voice: ${AiConfig.VOICE_NAME}", fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+
+                Button(
+                    onClick = {
+                        lifecycleScope.launch { provider.stop() }
+                        useStreaming = !useStreaming
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (useStreaming) {
+                            "transport: STREAMING (one voice, app speaks)"
+                        } else {
+                            "transport: managed (model has its own voice)"
+                        },
+                    )
+                }
 
                 Text("state: ${report.state}", fontSize = 18.sp)
                 Text("connects ${report.connects}   reconnects ${report.reconnects}", fontSize = 14.sp)
@@ -83,7 +123,7 @@ class VoiceSpikeActivity : ComponentActivity() {
 
                 Button(
                     onClick = {
-                        lifecycleScope.launch { diagnosis.value = "checking..."; diagnosis.value = provider.diagnose() }
+                        lifecycleScope.launch { diagnosis.value = "checking..."; diagnosis.value = managed.diagnose() }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Diagnose (text request)") }
@@ -99,8 +139,9 @@ class VoiceSpikeActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        speech.stop()
         // Never keep the microphone open once the spike leaves the foreground.
-        lifecycleScope.launch { provider.stop() }
+        lifecycleScope.launch { managed.stop(); streaming.stop() }
     }
 
     private fun mutableStateOfMicPermission() = androidx.compose.runtime.mutableStateOf(

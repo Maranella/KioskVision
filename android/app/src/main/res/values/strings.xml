@@ -22,8 +22,8 @@
     <string name="action_open_settings">Open settings</string>
 
     <!-- Live assist UI -->
-    <string name="action_voice_command">Voice command</string>
-    <string name="action_cancel_listening">Stop listening</string>
+    <string name="action_voice_command">Start listening</string>
+    <string name="action_cancel_listening">Listening. Tap to stop.</string>
     <string name="action_repeat">Repeat</string>
     <string name="action_stop_guidance">Stop guidance</string>
     <string name="action_rescan">Read screen again</string>

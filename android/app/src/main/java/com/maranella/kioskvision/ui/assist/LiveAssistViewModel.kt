@@ -17,6 +17,7 @@ import com.maranella.kioskvision.camera.FocusState
 import com.maranella.kioskvision.camera.ScreenFocusController
 import com.maranella.kioskvision.hand.HandLandmarkTracker
 import com.maranella.kioskvision.ocr.KioskOcrEngine
+import com.maranella.kioskvision.pipeline.AssistancePhase
 import com.maranella.kioskvision.pipeline.DebugFrame
 import com.maranella.kioskvision.pipeline.LiveAssistPipeline
 import com.maranella.kioskvision.pipeline.SessionSnapshot
@@ -29,11 +30,10 @@ import com.maranella.kioskvision.speech.SpeechCommandRecognizer
 import com.maranella.kioskvision.speech.SpeechOutputStatus
 import com.maranella.kioskvision.ui.main.PermissionStatus
 import com.maranella.kioskvision.voice.AssistantActions
-import com.maranella.kioskvision.voice.GeminiLiveVoiceProvider
+import com.maranella.kioskvision.voice.AssistantReply
+import com.maranella.kioskvision.voice.StreamingVoiceProvider
+import com.maranella.kioskvision.voice.TextAssistant
 import com.maranella.kioskvision.voice.ToolOutcome
-import com.maranella.kioskvision.voice.ReconnectDecision
-import com.maranella.kioskvision.voice.ReconnectPolicy
-import com.maranella.kioskvision.voice.VoiceProvider
 import com.maranella.kioskvision.voice.VoiceSessionReport
 import com.maranella.kioskvision.voice.VoiceSessionState
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +41,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -96,6 +100,8 @@ data class LiveAssistUiState(
     val showAssistantConsent: Boolean = false,
     /** Live session state, as the provider actually reports it. */
     val voice: VoiceSessionReport = VoiceSessionReport(VoiceSessionState.Idle),
+    /** The assistant's most recent reply, shown for diagnostics; never kiosk content. */
+    val assistantText: String? = null,
 )
 
 /**
@@ -137,14 +143,43 @@ class LiveAssistViewModel(application: Application) :
      * no method that could carry them (ADR-009). What is on the kiosk screen is answered from
      * [SpokenMessage] values the pipeline produces, never in the model's own words.
      */
-    private val voiceProvider: VoiceProvider = GeminiLiveVoiceProvider(application, actions = this)
+    /**
+     * The assistant, over text generation rather than the Live transport.
+     *
+     * Speech in comes from [recognizer], the reply comes back as text, and [speech] says it.
+     * One voice, because `generateContent` has no audio to emit.
+     */
+    private val assistant = TextAssistant(actions = this)
+
+    /**
+     * The microphone transport. Owns capture itself so listening is continuous and silent;
+     * replies arrive as text and are spoken by [speech], never by the model.
+     */
+    private val streaming = StreamingVoiceProvider(
+        context = application,
+        actions = this,
+        onSpeak = { text -> viewModelScope.launch { speakAssistant(text) } },
+        onCancelSpeech = { speech.stop() },
+    )
     private val targetResolver = TargetResolver()
     private val voicePreferences = VoicePreferences(application)
-    private val reconnect = ReconnectPolicy()
     private val audioOutput = AudioOutputCoordinator()
 
-    /** The single job that owns the Live session, so a second one cannot be started. */
-    private var voiceJob: Job? = null
+    /** One assistant request at a time; a newer question cancels an unanswered one. */
+    private var assistantJob: Job? = null
+
+    /** The continuous recognition loop. */
+    private var listenJob: Job? = null
+
+    /** Holds the microphone closed while the app is speaking. */
+    private var speakJob: Job? = null
+    private var guidanceSpeakJob: Job? = null
+
+    /** Identifies one reply across its stages in the log. */
+    private var speechRequestId = 0L
+
+    /** When a directional cue was last spoken; conversation yields for a moment after one. */
+    private var lastDirectionSpokenMs = Long.MIN_VALUE / 2
 
     /** Outlives [viewModelScope] only long enough to release the microphone and the socket. */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -157,6 +192,8 @@ class LiveAssistViewModel(application: Application) :
 
     init {
         // Diagnostic logging names recognised screen content, so it is for debug builds only.
+        streaming.diagnosticsEnabled =
+            application.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         pipeline.diagnosticsEnabled =
             application.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         _state.update {
@@ -186,14 +223,19 @@ class LiveAssistViewModel(application: Application) :
     fun onForegroundChanged(visible: Boolean) {
         if (visible) {
             motion.start()
+            // Hands-free: the user is holding the phone at a kiosk and reaching for a button
+            // with the other hand. Only after they have explicitly enabled the assistant, and
+            // only while this screen is in front of them — leaving it stops the microphone.
+            if (_state.value.assistantEnabled &&
+                _state.value.micPermission == PermissionStatus.Granted
+            ) {
+                startListening()
+            }
             // Begins screen acquisition, which is also the only thing that asks for focus.
             pipeline.start()
         } else {
             motion.stop()
             cancelListening()
-            // The microphone must not stay open behind a backgrounded screen, and the Live
-            // session must not keep streaming audio to Google when nobody is using it.
-            stopLiveAssistant()
             speech.stop()
             pipeline.stopSilently()
         }
@@ -239,8 +281,6 @@ class LiveAssistViewModel(application: Application) :
     fun onVoiceCommandPressed() {
         val state = _state.value
         when {
-            // Already talking, either way: this press means stop.
-            state.voiceMode == VoiceMode.LiveAssistant -> stopLiveAssistant()
             state.listening -> cancelListening()
 
             state.micPermission != PermissionStatus.Granted ->
@@ -250,45 +290,70 @@ class LiveAssistViewModel(application: Application) :
             // screen the user has no reason to visit.
             !voicePreferences.hasChosen -> _state.update { it.copy(showAssistantConsent = true) }
 
-            state.assistantEnabled -> startLiveAssistant()
+            // Always the same path now: the device recognises the speech, the assistant
+            // answers in text, and one engine speaks. There is no longer a branch that gives
+            // the model a voice of its own.
             else -> startListening()
         }
     }
 
+    /**
+     * Listens continuously until stopped, rather than once per button press.
+     *
+     * A blind user at a kiosk has one hand on the phone and the other reaching for a button;
+     * requiring a press before every sentence makes the assistant useless at exactly the
+     * moment it is needed. Android's recogniser is one-shot, so this restarts it in a loop.
+     *
+     * **The loop pauses while the app itself is speaking.** That is the half-duplex gate the
+     * Live transport could never have: both sides are now the app's, so "are we making sound
+     * right now" is answered by the engine's own utterance callbacks instead of a timer
+     * (R-24). Without it the assistant hears its own replies and answers them.
+     */
+    /**
+     * Opens continuous listening.
+     *
+     * Android's `SpeechRecognizer` is one-shot: it ends after about 800 ms of silence, and
+     * every restart plays the system's recognition tone. Looping it for hands-free use turned
+     * the app into a beep every second that never heard a sentence — measured as
+     * `error 7 -> NoMatch` on repeat.
+     *
+     * So the microphone is the app's own `AudioRecord` instead, streamed straight to the
+     * model. No restarts, no tone, and silence between sentences costs nothing. The reply
+     * comes back as **text** and is spoken by the one local engine, so there is still exactly
+     * one voice (R-26).
+     */
     private fun startListening() {
-        // Push-to-talk and the Live session cannot both hold the microphone. The Live session
-        // is stopped rather than refused, because the user pressing the button is a clear
-        // statement about which one they want.
-        if (_state.value.voiceMode == VoiceMode.LiveAssistant) stopLiveAssistant()
-        // Silence our own speech first so the recognizer does not hear it.
+        if (listenJob?.isActive == true) return
         speech.stop()
-        pipeline.speechMuted = true
+        // Deliberately NOT muting pipeline speech. That flag exists so the local recogniser
+        // does not hear the app's own directions and treat them as commands, and it was set
+        // for as long as listening lasted. With listening now continuous it stayed on for
+        // ever, and `if (toSpeak != null && !speechMuted)` silenced every direction — the
+        // app guided correctly and said nothing. The microphone is paused around each
+        // utterance instead, which solves the same problem without muting the user.
+        pipeline.speechMuted = false
         _state.update { it.copy(listening = true, heardText = null) }
-        recognizer.start(
-            object : SpeechCommandRecognizer.Listener {
-                override fun onListening() = Unit
 
-                override fun onResults(hypotheses: List<String>) {
-                    endListening()
-                    handleHypotheses(hypotheses)
-                }
-
-                override fun onFailure(reason: RecognitionFailure) {
-                    endListening()
-                    if (reason == RecognitionFailure.ServiceUnavailable) {
-                        _state.update { it.copy(recognitionAvailable = false) }
+        listenJob = viewModelScope.launch {
+            launch {
+                streaming.report.collect { report ->
+                    _state.update {
+                        it.copy(
+                            voice = report,
+                            heardText = report.lastUserText ?: it.heardText,
+                        )
                     }
-                    if (reason == RecognitionFailure.LanguageUnsupported) {
-                        _state.update { it.copy(georgianRecognition = false) }
-                    }
-                    say(SpokenMessage.RecognitionFailed(reason))
                 }
-            },
-        )
+            }
+            streaming.start()
+        }
     }
 
     private fun cancelListening() {
-        if (_state.value.listening) recognizer.cancel()
+        listenJob?.cancel()
+        listenJob = null
+        recognizer.cancel()
+        viewModelScope.launch { streaming.stop() }
         endListening()
     }
 
@@ -309,91 +374,136 @@ class LiveAssistViewModel(application: Application) :
                 parsed.mapNotNull { (it.second as? AssistCommand.SelectTarget)?.query }.distinct(),
             )
             AssistCommand.Repeat -> repeatLast()
-            AssistCommand.Unknown -> say(SpokenMessage.NotUnderstood)
+            // Not one of the app's own commands, so it is a question for the assistant
+            // rather than a misheard instruction — unless the user declined, in which case
+            // nothing of theirs is sent anywhere.
+            AssistCommand.Unknown ->
+                if (_state.value.assistantEnabled) askAssistant(heard) else say(SpokenMessage.NotUnderstood)
             AssistCommand.ReadScreen, AssistCommand.Stop -> pipeline.submit(command)
         }
     }
 
-    // --- Live assistant ---------------------------------------------------------------------
+    // --- Live assistant ----------------------------------------------------------------------
+    //
+    // Deliberately absent. The streaming transport gives the model an AudioTrack the app can
+    // neither mute nor observe, which alongside the device's Georgian text-to-speech is two
+    // voices at once — unusable when audio is the whole interface. Configuration could not fix
+    // it: ResponseModality.TEXT stops the microphone after about 491 ms (R-24).
+    //
+    // Conversation now goes through TextAssistant, whose endpoint has no audio to emit. The
+    // Live provider remains only in the debug diagnostics screen, for comparison.
 
     /**
-     * Starts or stops the streaming Georgian assistant.
+     * The user answered the one-time question about the assistant.
      *
-     * Always user-initiated. Audio leaves the device only between this being switched on and
-     * off, which is the boundary `SAFETY_AND_PRIVACY.md` draws.
+     * Still asked, and still about the same boundary: what the user says is recognised and
+     * then sent to Google as text. The camera, the OCR and the fingertip never leave the
+     * device, whatever the answer.
      */
-    /** The user answered the one-time question about the streaming assistant. */
     fun onAssistantConsent(enabled: Boolean) {
         voicePreferences.assistantEnabled = enabled
         _state.update { it.copy(assistantEnabled = enabled, showAssistantConsent = false) }
-        // Honour the choice immediately: they asked to talk, and now we know how.
         onVoiceCommandPressed()
     }
 
     fun dismissAssistantConsent() = _state.update { it.copy(showAssistantConsent = false) }
 
-    private fun startLiveAssistant() {
-        // One session at a time. A second job would mean a second microphone consumer and a
-        // second billable audio stream, both invisible from the UI.
-        if (voiceJob?.isActive == true) return
-        cancelListening()
-        speech.stop()
-        reconnect.reset()
-        _state.update { it.copy(voiceMode = VoiceMode.LiveAssistant) }
-
-        voiceJob = viewModelScope.launch {
-            // Collecting inside the session job means the collector dies with the session;
-            // a collector outliving it is how a leak starts.
-            launch {
-                voiceProvider.report.collect { report ->
-                    audioOutput.onModelSpeaking(report.state == VoiceSessionState.Speaking)
-                    if (report.state == VoiceSessionState.Listening) reconnect.onConnected()
-                    _state.update { it.copy(voice = report) }
-                    handleSessionEnd(report)
+    /**
+     * Sends an utterance the local parser did not recognise to the assistant.
+     *
+     * The reply is spoken through the one coordinator the rest of the app uses, so it obeys
+     * the same cancellation, de-duplication and priority rules as everything else. Nothing is
+     * sent about the kiosk: only the user's own words leave the device.
+     */
+    private fun askAssistant(heard: String) {
+        if (heard.isBlank()) {
+            say(SpokenMessage.NotUnderstood)
+            return
+        }
+        assistantJob?.cancel()
+        assistantJob = viewModelScope.launch {
+            when (val reply = assistant.respond(heard)) {
+                is AssistantReply.Speak -> speakAssistant(reply.text)
+                // The app announces what it did in its own voice; adding the assistant's
+                // commentary on top is how two voices start overlapping.
+                AssistantReply.Acted -> Unit
+                is AssistantReply.Failed -> {
+                    Log.w(TAG, "assistant unavailable: ${reply.reason}")
+                    say(SpokenMessage.NotUnderstood)
                 }
             }
-            voiceProvider.start()
         }
-    }
-
-    private fun stopLiveAssistant() {
-        val job = voiceJob
-        voiceJob = null
-        reconnect.reset()
-        audioOutput.onModelSpeaking(false)
-        _state.update { it.copy(voiceMode = VoiceMode.LocalCommands) }
-        // Cancelling the job stops the collector; the provider still has to be told, because
-        // closing the socket and releasing the microphone is its own work.
-        job?.cancel()
-        viewModelScope.launch { voiceProvider.stop() }
     }
 
     /**
-     * Reacts to a session that has ended, within the limits of [ReconnectPolicy].
+     * Speaks one guidance message with the microphone closed for its duration.
      *
-     * A planned rollover is reconnected promptly, because the user is mid-conversation. A
-     * failure backs off and eventually stops: retrying a revoked key or a retired model in a
-     * loop burns the request quota, holds the microphone, and never succeeds.
+     * The same gate the assistant's replies use. Without it the model hears "move a little
+     * left" through the open microphone, transcribes it as the user and answers it.
      */
-    private suspend fun handleSessionEnd(report: VoiceSessionReport) {
-        if (_state.value.voiceMode != VoiceMode.LiveAssistant) return
-        val decision = when (report.state) {
-            VoiceSessionState.Reconnecting -> reconnect.onPlannedRollover()
-            VoiceSessionState.Error -> reconnect.onFailure()
-            else -> return
-        }
-        when (decision) {
-            is ReconnectDecision.RetryAfter -> {
-                delay(decision.delayMs)
-                if (_state.value.voiceMode == VoiceMode.LiveAssistant) voiceProvider.start()
+    private fun speakGuidance(message: SpokenMessage) {
+        speech.speak(message)
+        guidanceSpeakJob?.cancel()
+        guidanceSpeakJob = viewModelScope.launch {
+            streaming.microphonePaused = true
+            try {
+                withTimeoutOrNull(SPEECH_START_TIMEOUT_MS) {
+                    while (!speech.isSpeaking) delay(SPEECH_POLL_MS)
+                }
+                while (speech.isSpeaking) delay(SPEECH_POLL_MS)
+                delay(MIC_RESUME_DELAY_MS)
+            } finally {
+                streaming.microphonePaused = false
             }
+        }
+    }
 
-            is ReconnectDecision.GiveUp -> {
-                Log.w(TAG, "live voice unavailable after ${decision.attempts} attempts")
-                // Falls back to on-device commands rather than leaving the user with a dead
-                // assistant: camera, OCR and guidance all still work without the network.
-                stopLiveAssistant()
-                say(SpokenMessage.RecognitionFailed(RecognitionFailure.NetworkRequired))
+    /** The assistant's own words, through the single speech engine. */
+    private fun speakAssistant(text: String) {
+        // Deliberately **not** gated on `listening`. It was, and with continuous listening
+        // that flag is always true, so the assistant never said a word: the reply came back
+        // and went nowhere. The guard made sense only while listening meant holding a button.
+        //
+        // Directions win over conversation, but only once directions are actually being
+        // given. Suppressing on the phase alone silenced the one sentence that tells the user
+        // guidance has begun — "move your finger and follow the directions" — so the assistant
+        // went quiet at the exact moment it had succeeded.
+        val sinceDirection = elapsedNow() - lastDirectionSpokenMs
+        if (sinceDirection < DIRECTION_HOLDS_VOICE_MS) {
+            if (pipeline.diagnosticsEnabled) {
+                Log.i(TAG, "speak: suppressed, a direction was spoken ${sinceDirection}ms ago")
+            }
+            return
+        }
+        _state.update { it.copy(assistantText = text) }
+
+        val requestId = ++speechRequestId
+        if (pipeline.diagnosticsEnabled) {
+            Log.i(TAG, "speak#$requestId: ${text.length} chars, tts=${_state.value.speechOutput}")
+        }
+        speakJob?.cancel()
+        speakJob = viewModelScope.launch {
+            // The microphone is live while we talk, so it is muted for the duration —
+            // otherwise the assistant hears itself and answers its own reply.
+            streaming.microphonePaused = true
+            try {
+                speech.speakText(text)
+                // Wait for the engine to actually start, then for it to finish. Both edges
+                // come from its own utterance callbacks, which is the one signal in this app
+                // that means "sound is coming out" rather than "sound was requested".
+                withTimeoutOrNull(SPEECH_START_TIMEOUT_MS) {
+                    while (!speech.isSpeaking) delay(SPEECH_POLL_MS)
+                }
+                val started = speech.isSpeaking
+                while (speech.isSpeaking) delay(SPEECH_POLL_MS)
+                delay(MIC_RESUME_DELAY_MS)
+                if (pipeline.diagnosticsEnabled) {
+                    // "started=false" means the engine never produced sound: the reply reached
+                    // it and died there, which looks exactly like the model saying nothing.
+                    Log.i(TAG, "speak#$requestId: done, engineStarted=$started")
+                }
+            } finally {
+                streaming.microphonePaused = false
             }
         }
     }
@@ -423,7 +533,14 @@ class LiveAssistViewModel(application: Application) :
         // goes through the pipeline, which stays the single authority on the live target and
         // owns anchoring, confirmation and screen transitions. Both reach their answer through
         // TargetMatcher, so they agree about what exists; the pipeline simply knows more.
-        if (outcome == ToolOutcome.Guiding || outcome == ToolOutcome.Ambiguous) {
+        // Unconfirmed is included deliberately: the pipeline holds such a request open for
+        // several seconds while it looks for a better frame (R-12), which is a far more
+        // useful answer than dropping it. Only a label that is genuinely absent is refused
+        // outright.
+        if (outcome == ToolOutcome.Guiding ||
+            outcome == ToolOutcome.Ambiguous ||
+            outcome == ToolOutcome.Unconfirmed
+        ) {
             pipeline.selectTarget(listOf(query))
         }
         return outcome
@@ -441,10 +558,23 @@ class LiveAssistViewModel(application: Application) :
 
     private fun elapsedNow() = android.os.SystemClock.elapsedRealtime()
 
+    /** True while the app is actively guiding a finger, which is when it owns the voice. */
+    private fun isGuiding(): Boolean = _state.value.session.phase.let {
+        it == AssistancePhase.GuidingFinger || it == AssistancePhase.WaitingForScreenChange
+    }
+
     // --- Panel actions ----------------------------------------------------------------------
 
+    /**
+     * Says the last message again, at the user's request.
+     *
+     * Routed through [say] rather than straight to the engine. Calling the engine directly
+     * bypassed both the audio coordinator and the rule about which voice owns the channel, so
+     * pressing Repeat during an assistant reply produced two voices at once — one of the two
+     * ways that could happen.
+     */
     fun repeatLast() {
-        _state.value.lastMessage?.let { speech.speak(it) }
+        _state.value.lastMessage?.let { say(it, userRequested = true) }
     }
 
     /**
@@ -475,7 +605,12 @@ class LiveAssistViewModel(application: Application) :
         viewModelScope.launch(Dispatchers.Main.immediate) { say(message) }
     }
 
-    override fun onSession(snapshot: SessionSnapshot) = _state.update { it.copy(session = snapshot) }
+    override fun onSession(snapshot: SessionSnapshot) {
+        // A new target, or a new screen, makes the previous sentence stale rather than
+        // repetitive: it must not be suppressed as a duplicate.
+        if (snapshot.targetLabel != _state.value.session.targetLabel) audioOutput.onContextChanged()
+        _state.update { it.copy(session = snapshot) }
+    }
 
     override fun onDebugFrame(frame: DebugFrame) {
         _debugFrame.value = frame
@@ -491,36 +626,67 @@ class LiveAssistViewModel(application: Application) :
      * Speaks a guidance message, unless the assistant is already talking and the message can
      * wait. See [AudioOutputCoordinator] for the ranking.
      */
-    private fun say(message: SpokenMessage) {
+    private fun say(message: SpokenMessage, userRequested: Boolean = false) {
+        if (message is SpokenMessage.Direction) lastDirectionSpokenMs = elapsedNow()
         _state.update { it.copy(lastMessage = message) }
-        if (_state.value.listening) return
-        when (audioOutput.decide(message)) {
-            SpeechDecision.SpeakNow -> speech.speak(message)
-            SpeechDecision.PreemptModel -> {
-                // Nothing here can silence the model's own playback — the SDK owns it — so the
-                // overlap is reduced rather than removed. Recorded as a known gap.
-                speech.speak(message)
-            }
+        // No `listening` guard: with continuous listening it is always true, and it silenced
+        // every direction the guidance engine produced.
+        // An explicit Repeat is honoured whatever else is happening; the user asked.
+        if (userRequested) {
+            speech.speak(message)
+            audioOutput.decide(message, elapsedNow(), userRequested = true)
+            return
+        }
+
+        when (audioOutput.decide(message, elapsedNow())) {
+            SpeechDecision.SpeakNow, SpeechDecision.PreemptModel -> speakGuidance(message)
             SpeechDecision.Drop -> Unit
         }
     }
 
     override fun onCleared() {
         motion.stop()
-        voiceJob?.cancel()
-        voiceJob = null
+        assistantJob?.cancel()
+        assistant.reset()
+        teardownScope.launch { runCatching { streaming.stop() } }
         // viewModelScope is already cancelled by the time this runs, so closing the socket and
         // releasing the microphone happens on a scope that outlives it. One short job, on a
         // scope this ViewModel owns, rather than GlobalScope: the work must finish, but it
         // must not outlive the process arbitrarily either.
-        teardownScope.launch { runCatching { voiceProvider.stop() } }
         focusController.detach()
         recognizer.destroy()
         speech.shutdown()
         pipeline.release()
     }
 
+    /** The outcome of one recognition turn, classified by what the loop should do next. */
+    private sealed interface Recognition {
+        data class Heard(val hypotheses: List<String>) : Recognition
+        data object Silent : Recognition
+        data object Retryable : Recognition
+        data class Fatal(val reason: RecognitionFailure) : Recognition
+    }
+
     private companion object {
         const val TAG = "LiveAssistViewModel"
+
+        /** How often the loop checks whether the app has stopped speaking. */
+        const val SPEECH_POLL_MS = 120L
+
+        /** Breath before retrying a recogniser that was busy. */
+        const val RETRY_DELAY_MS = 400L
+
+        /** How long to wait for the engine to start before assuming it will not. */
+        const val SPEECH_START_TIMEOUT_MS = 1_500L
+
+        /** Tail of silence after speaking, so the room's echo is not captured either. */
+        const val MIC_RESUME_DELAY_MS = 250L
+
+        /**
+         * How long a spoken direction keeps the channel. Long enough that conversation does
+         * not interleave with a run of cues, short enough that a question asked mid-reach is
+         * still answered.
+         */
+        const val DIRECTION_HOLDS_VOICE_MS = 3_000L
     }
 }

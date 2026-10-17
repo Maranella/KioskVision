@@ -26,6 +26,13 @@ import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.liveGenerationConfig
 import com.maranella.kioskvision.ai.AiConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,6 +81,9 @@ class GeminiLiveVoiceProvider(
     /** Restored on stop, so leaving the app does not leave the phone in call audio mode. */
     private var previousAudioMode: Int? = null
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var watchdog: Job? = null
+
     private val _report = MutableStateFlow(VoiceSessionReport(VoiceSessionState.Idle))
     override val report: StateFlow<VoiceSessionReport> = _report.asStateFlow()
 
@@ -96,9 +106,11 @@ class GeminiLiveVoiceProvider(
         try {
             val model = Firebase.ai(backend = GenerativeBackend.googleAI()).liveModel(
                 modelName = AiConfig.LIVE_MODEL,
-                tools = if (actions == null) emptyList() else listOf(assistantTool()),
+                tools = if (actions == null) emptyList() else listOf(AssistantToolSchema.tool()),
                 generationConfig = liveGenerationConfig {
-                    responseModality = ResponseModality.AUDIO
+                    // TEXT silences the model's own speaker so one engine speaks (AiConfig).
+                    responseModality =
+                        if (AiConfig.SINGLE_VOICE) ResponseModality.TEXT else ResponseModality.AUDIO
                     // Georgian for the spoken reply. The voice is left at the service default;
                     // naturalness in Georgian is one of the things this spike has to judge.
                     speechConfig = SpeechConfig(Voice(AiConfig.VOICE_NAME), AiConfig.SPOKEN_LANGUAGE)
@@ -107,7 +119,7 @@ class GeminiLiveVoiceProvider(
                     inputAudioTranscription = AudioTranscriptionConfig()
                     outputAudioTranscription = AudioTranscriptionConfig()
                 },
-                systemInstruction = content { text(systemInstruction()) },
+                systemInstruction = content { text(AssistantPrompt.text()) },
             )
 
             val opened = model.connect()
@@ -117,6 +129,7 @@ class GeminiLiveVoiceProvider(
             }
 
             routeCommunicationAudio()
+            watchForClose(opened)
 
             opened.startAudioConversation(
                 LiveAudioConversationConfig.builder()
@@ -209,7 +222,7 @@ class GeminiLiveVoiceProvider(
         // error naming the offending field if the schema is the problem.
         val withTool = runCatching {
             Firebase.ai(backend = GenerativeBackend.googleAI())
-                .generativeModel(AiConfig.TEXT_MODEL, tools = listOf(assistantTool()))
+                .generativeModel(AiConfig.TEXT_MODEL, tools = listOf(AssistantToolSchema.tool()))
                 .generateContent("Say OK")
         }
         val toolResult = withTool.fold(
@@ -226,11 +239,42 @@ class GeminiLiveVoiceProvider(
             _report.update { it.copy(state = VoiceSessionState.Stopped) }
             return
         }
+        watchdog?.cancel()
+        watchdog = null
         runCatching { open.stopAudioConversation() }
         runCatching { open.close() }
         restoreAudioRoute()
         session = null
         _report.update { it.copy(state = VoiceSessionState.Stopped) }
+    }
+
+    /**
+     * Notices when the session ends, which nothing otherwise does.
+     *
+     * `startAudioConversation` returns without saying whether the conversation is still alive,
+     * and the socket can be closed by the server at any time — the SDK surfaces that only
+     * through `isClosed()`. Without this the session died silently after a few seconds: the
+     * microphone was released, the UI still said the assistant was listening, and the
+     * reconnect policy never fired because nothing told it the session had ended.
+     *
+     * Reported as [VoiceSessionState.Error] rather than Stopped, because an end nobody asked
+     * for is a failure, and the retry budget is what should decide whether to try again.
+     */
+    private fun watchForClose(session: LiveSession) {
+        watchdog?.cancel()
+        watchdog = scope.launch {
+            while (isActive) {
+                delay(CLOSE_POLL_MS)
+                if (session.isClosed()) {
+                    Log.i(TAG, "live session closed by the server")
+                    restoreAudioRoute()
+                    _report.update {
+                        it.copy(state = VoiceSessionState.Error, error = "session closed")
+                    }
+                    return@launch
+                }
+            }
+        }
     }
 
     /**
@@ -293,34 +337,6 @@ class GeminiLiveVoiceProvider(
      * language, while the model's *comprehension* of the Georgian stays correct. A function
      * call comes from that comprehension, so it carries the meaning the transcript loses.
      */
-    private fun assistantTool(): Tool = Tool.functionDeclarations(
-        listOf(
-            FunctionDeclaration(
-                name = AssistantTools.SELECT_TARGET,
-                description = "Guide the user's finger to a control on the kiosk screen. " +
-                    "Call this whenever the user asks where something is, which button to " +
-                    "press, or how to continue. You cannot see the screen: pass what the user " +
-                    "asked for in their own words and the app will decide whether it exists.",
-                parameters = mapOf(
-                    AssistantTools.QUERY_ARGUMENT to Schema.string(
-                        description = "What the user asked for, in Georgian, e.g. \"გადახდა\".",
-                    ),
-                ),
-            ),
-            FunctionDeclaration(
-                name = AssistantTools.STOP_GUIDANCE,
-                description = "Stop guiding the finger. Call this when the user asks you to stop.",
-                parameters = emptyMap(),
-            ),
-            FunctionDeclaration(
-                name = AssistantTools.READ_SCREEN,
-                description = "Read the kiosk screen aloud to the user. Call this when they " +
-                    "ask what is on the screen. The app reads it; you will not be told the text.",
-                parameters = emptyMap(),
-            ),
-        ),
-    )
-
     /**
      * Answers one tool call, synchronously, on the SDK's thread.
      *
@@ -347,63 +363,11 @@ class GeminiLiveVoiceProvider(
      * The prompt, built in one place because it carries the only two levers the SDK leaves over
      * input interpretation: the language assertion and the domain vocabulary.
      */
-    private fun systemInstruction(): String = buildString {
-        // speechConfig.languageCode sets the *output* voice only: input audio was being
-        // auto-detected and transcribed as Russian. The system instruction is the only lever
-        // the SDK exposes over interpretation.
-        append("The user speaks Georgian (ka) and only Georgian. ")
-        append("Always interpret incoming audio as Georgian, never as Russian or any other ")
-        append("language, even when the audio is unclear. ")
-        append("Transcribe what you hear in Georgian (Mkhedruli) script, never transliterated ")
-        append("into Latin letters. ")
-        // Short utterances are where recognition fails: "დენი" came back as "ტენისი". Naming
-        // the domain gives the decoder something to prefer when the audio is ambiguous.
-        append("The user is blind and is standing at a self-service payment kiosk in Georgia. ")
-        append("Utterances are often a single short word. ")
-        append("Expect these Georgian words and prefer them over similar-sounding ones: ")
-        append(AiConfig.DOMAIN_VOCABULARY.joinToString(", "))
-        append(". ")
-
-        // --- What the assistant is for -------------------------------------------------
-        //
-        // An earlier version of this prompt banned so much that the assistant could only
-        // repeat the user's words back, which the product owner reported as it having gone
-        // flat. That restriction existed because the model had no way to *do* anything, so
-        // any offer of help would have been a fabrication. It now has tools, so "I will find
-        // the payment button" is a true statement followed by a real action.
-        append("You are a helpful assistant, not a transcript. Be useful: work out what the ")
-        append("user wants, ask one short clarifying question when the request is vague, and ")
-        append("then act by calling a function. ")
-        append("When they ask where something is, which button to press, or how to continue, ")
-        append("call select_target. When they ask what is on the screen, call read_screen. ")
-        append("When they ask you to stop, call stop_guidance. ")
-        append("Prefer calling a function over describing what you would do. ")
-        // The app speaks the specifics itself, in its own voice, from what the camera saw.
-        // Without this the two voices say the same thing one after the other.
-        append("After a function call, the app itself tells the user the details out loud, so ")
-        append("keep your own reply to a brief acknowledgement or say nothing. ")
-
-        // --- The hard safety boundary ---------------------------------------------------
-        //
-        // R-20: framed as the kiosk, the model announced "forty lari received", "the amount is
-        // confirmed" and "payment mode is active" with no kiosk present. A blind user cannot
-        // check such a claim. These bans stay; what was relaxed above is the part that was
-        // stopping the model from being helpful, not the part that keeps it honest.
-        append("YOU ARE NOT THE KIOSK AND YOU CANNOT SEE ITS SCREEN. ")
-        append("Never state that money was received, that an amount was confirmed, that a ")
-        append("payment went through, that a button was pressed, or that any step of a ")
-        append("transaction has completed. Never describe what the kiosk screen shows or ")
-        append("where anything is on it — you have not seen it. If asked, say in Georgian that ")
-        append("you cannot see the screen yourself but the app will read it, and call ")
-        append("read_screen. ")
-        append("The user presses every button themselves; never imply you pressed anything. ")
-
-        append("Always reply in Georgian, in one or two short sentences. ")
-        append("Never ask for or repeat a PIN or card number.")
-    }
-
     private companion object {
         const val TAG = "GeminiLiveVoice"
+
+        /** How often the socket is checked for having been closed from the other end. */
+        const val CLOSE_POLL_MS = 1_000L
 
         /**
          * Output devices in order of preference. A headset keeps the assistant's voice out of

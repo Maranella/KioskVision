@@ -55,11 +55,40 @@ class GuidanceSpeechOutput(
         val engine = tts ?: return
         val text = SpokenMessageText.render(phrases ?: return, message)
         val mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-        engine.speak(text, mode, null, "kv-${System.nanoTime()}")
+        engine.speak(text, mode, null, nextUtteranceId())
     }
+
+    /**
+     * Speaks a sentence the assistant produced, rather than one of the app's own
+     * [SpokenMessage] values.
+     *
+     * Deliberately separate. Everything the app says about the kiosk goes through
+     * `SpokenMessage`, a closed set grounded in what the camera saw (ADR-009); this carries
+     * the assistant's conversation, which is about the user's intent and never about the
+     * screen. Keeping them apart is what stops free-form model text from becoming a claim
+     * about a button.
+     */
+    fun speakText(text: String, interrupt: Boolean = true) {
+        val engine = tts ?: return
+        if (text.isBlank()) return
+        val mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        engine.speak(text, mode, null, nextUtteranceId())
+    }
+
+    /**
+     * Whether this engine is producing sound right now.
+     *
+     * Reported from the engine's own utterance callbacks, which is the only signal in this
+     * app that actually means "audio is playing" — the Live SDK offers nothing equivalent for
+     * its own playback, and `turnComplete` describes the model's turn, not the speaker.
+     */
+    @Volatile
+    var isSpeaking: Boolean = false
+        private set
 
     fun stop() {
         tts?.stop()
+        isSpeaking = false
     }
 
     fun shutdown() {
@@ -109,8 +138,19 @@ class GuidanceSpeechOutput(
         }
     }
 
+    private var utteranceCount = 0L
+
+    private fun nextUtteranceId(): String = "kv-${utteranceCount++}"
+
     private fun use(engine: TextToSpeech, locale: Locale, status: SpeechOutputStatus) {
         engine.language = locale
+        engine.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) { isSpeaking = true }
+            override fun onDone(utteranceId: String?) { isSpeaking = false }
+            @Deprecated("Required override", ReplaceWith(""))
+            override fun onError(utteranceId: String?) { isSpeaking = false }
+            override fun onStop(utteranceId: String?, interrupted: Boolean) { isSpeaking = false }
+        })
         engine.setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)

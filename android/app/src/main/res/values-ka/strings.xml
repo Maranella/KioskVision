@@ -20,8 +20,8 @@
     <string name="action_open_settings">პარამეტრების გახსნა</string>
 
     <!-- Live assist UI -->
-    <string name="action_voice_command">ხმოვანი ბრძანება</string>
-    <string name="action_cancel_listening">მოსმენის შეწყვეტა</string>
+    <string name="action_voice_command">მოსმენის ჩართვა</string>
+    <string name="action_cancel_listening">გისმენ. გასაჩერებლად დააჭირე.</string>
     <string name="action_repeat">გაიმეორე</string>
     <string name="action_stop_guidance">მიმართულების შეჩერება</string>
     <string name="action_rescan">ეკრანის თავიდან წაკითხვა</string>

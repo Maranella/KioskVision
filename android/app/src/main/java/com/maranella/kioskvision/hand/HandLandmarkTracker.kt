@@ -43,6 +43,31 @@ class HandLandmarkTracker private constructor(private val landmarker: HandLandma
      *
      * Does not take ownership of [bitmap].
      */
+    /**
+     * The whole hand from the last inference, in frame pixels, or null when none was seen.
+     *
+     * Exposed only so the developer overlay can draw it. Seeing twenty-one points land on a
+     * real hand is the difference between "MediaPipe is not running" and "MediaPipe runs and
+     * sees nothing", which look identical from a missing fingertip alone.
+     */
+    @Volatile
+    var lastLandmarks: List<Pair<Float, Float>>? = null
+        private set
+
+    /** Inferences run and inferences that produced a hand, for a detection rate. */
+    @Volatile
+    var inferences: Long = 0L
+        private set
+
+    @Volatile
+    var handsSeen: Long = 0L
+        private set
+
+    /** Milliseconds the last inference took. */
+    @Volatile
+    var lastInferenceMs: Long = 0L
+        private set
+
     fun detect(bitmap: Bitmap, timestampMs: Long): HandObservation? {
         // VIDEO mode requires strictly increasing timestamps.
         val timestamp = if (timestampMs <= lastTimestampMs) lastTimestampMs + 1 else timestampMs
@@ -51,13 +76,19 @@ class HandLandmarkTracker private constructor(private val landmarker: HandLandma
         // Deliberately not closed: closing a bitmap-backed MPImage recycles the caller's bitmap,
         // and it holds no native resources of its own.
         val image = BitmapImageBuilder(bitmap).build()
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         val result = landmarker.detectForVideo(image, timestamp)
+        lastInferenceMs = android.os.SystemClock.elapsedRealtime() - startedAt
+        inferences++
 
         val landmarks = result.landmarks().firstOrNull()
         if (landmarks == null) {
+            lastLandmarks = null
             lastMiss = "no hand in frame"
             return null
         }
+        handsSeen++
+        lastLandmarks = landmarks.map { it.x() * bitmap.width to it.y() * bitmap.height }
         val tip = landmarks.getOrNull(INDEX_FINGER_TIP)
         if (tip == null) {
             lastMiss = "no index fingertip landmark"

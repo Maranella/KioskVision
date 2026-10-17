@@ -26,6 +26,7 @@ import com.maranella.kioskvision.assist.GuidanceSpace
 import com.maranella.kioskvision.assist.KioskScene
 import com.maranella.kioskvision.assist.ObservedLabel
 import com.maranella.kioskvision.camera.Point
+import com.maranella.kioskvision.camera.Quad
 import com.maranella.kioskvision.camera.ScreenDetector
 import com.maranella.kioskvision.camera.ScreenLoss
 import com.maranella.kioskvision.camera.ScreenSpace
@@ -134,6 +135,40 @@ data class DebugFrame(
     val screenSignatureDistance: Float?,
     val focusState: FocusState,
     val sharpness: Float,
+    /** Monotonic id of the camera frame these values came from. */
+    val frameId: Long = 0L,
+    /** The detected kiosk screen, in frame pixels, or null when none is tracked. */
+    val screenQuad: Quad? = null,
+    val screenConfidence: Float = 0f,
+    val screenStable: Boolean = false,
+    val screenAgeMs: Long? = null,
+    val geometryVersion: Long = 0L,
+    /**
+     * The target box **as guidance saw it**: converted into screen space and mapped back to
+     * frame pixels through the same homography.
+     *
+     * Drawn beside the raw OCR box so a broken transform becomes visible. If the geometry is
+     * sound the two coincide; if it is not, they separate on screen, which is the only way a
+     * homography error can be caught by looking.
+     */
+    val guidanceTargetBox: TextBox? = null,
+    /** The fingertip after the same round trip, for the same reason. */
+    val guidanceFingertip: FingertipPoint? = null,
+    /** All twenty-one hand points from the last inference, in frame pixels. */
+    val handLandmarks: List<Pair<Float, Float>>? = null,
+    /** Why the last frame produced no fingertip, straight from the tracker. */
+    val handMiss: String? = null,
+    val handInferences: Long = 0L,
+    val handsSeen: Long = 0L,
+    /**
+     * Mean brightness of the analysis frame, 0-255.
+     *
+     * The one measurement that separates "the vision stack is broken" from "the camera is
+     * handing it a black picture". Everything downstream — MediaPipe, OCR, the screen
+     * detector — fails identically on an image with nothing in it, and nothing else in these
+     * diagnostics would say so.
+     */
+    val frameLuminance: Float = -1f,
     val referenceSharpness: Float,
 )
 
@@ -231,6 +266,8 @@ class LiveAssistPipeline(
     private val screenDetector = ScreenDetector()
     private val screenTracker = ScreenTracker()
     private var lastScreenDetectMs = 0L
+    private var frameId = 0L
+    private var lastFrameLuminance = -1f
     private val luminanceScratch = IntArray(SIGNATURE_SOURCE * SIGNATURE_SOURCE)
     private val engine = DirectionalGuidanceEngine()
     private val announcer = GuidanceAnnouncer()
@@ -392,6 +429,7 @@ class LiveAssistPipeline(
             return
         }
         val now = SystemClock.elapsedRealtime()
+        frameId++
         lastFrameSize = frame.size
 
         // --- Pipeline B: hand tracking, every frame ---------------------------------------
@@ -433,8 +471,12 @@ class LiveAssistPipeline(
 
         // --- Guidance ---------------------------------------------------------------------
         var output: GuidanceOutput? = null
+        // Built unconditionally so the developer overlay shows the very values guidance uses,
+        // rather than re-reading the tracker and drawing a convincing picture of something
+        // else. One source, two consumers.
+        val guidance = guidanceInput(now, smoothed, steady)
         if (phase == AssistancePhase.GuidingFinger) {
-            output = engine.update(guidanceInput(now, smoothed, steady))
+            output = engine.update(guidance)
             val toSpeak = announcer.onDirection(output.direction, now)
             if (toSpeak != null && !speechMuted) {
                 // TARGET_UNCERTAIN is one direction but several situations, and saying "I have
@@ -459,7 +501,7 @@ class LiveAssistPipeline(
 
         if (debugEnabled && now - lastDebugMs >= DEBUG_INTERVAL_MS) {
             lastDebugMs = now
-            emitDebugFrame(frame, raw, smoothed, output, steady, handMs, now)
+            emitDebugFrame(frame, raw, smoothed, output, steady, handMs, now, guidance)
         }
         if (!bitmapHandedOff) frame.bitmap.recycle()
     }
@@ -507,6 +549,7 @@ class LiveAssistPipeline(
         val ocr = ocrEngine ?: return false
         if (ocrInFlight) return false
         if (now - lastOcrStartMs < OCR_MIN_INTERVAL_MS) return false
+
 
         // A badly soft frame costs a full OCR run and yields text that will be rejected
         // anyway (R-12). Wait for a steadier one — but never for longer than
@@ -647,6 +690,23 @@ class LiveAssistPipeline(
 
         lastOcrMs = elapsedMs
         lastOcrFinishedMs = now
+
+        // A run that returns implausibly many lines did not read a screen; it read noise.
+        // Pointed at a dark desk, Tesseract produced **495 lines** in a 12.3 s run, against
+        // 442-568 ms for a rendered frame (R-11). Those phantom blocks go on to compete with
+        // real labels inside the tracker, which is one way a visible button stops being
+        // found.
+        //
+        // Rejected here rather than by refusing to run OCR without a detected screen: that
+        // coupling broke the end-to-end scenario outright, because the detector does not fire
+        // on the rendered frames the harness uses. This check is local, costs nothing, and
+        // cannot disable reading on a screen that is genuinely there.
+        if (blocks.size > MAX_PLAUSIBLE_LINES) {
+            Log.w(TAG, "discarding OCR run: ${blocks.size} lines is noise, not a screen")
+            unreadableRuns++
+            lastOcrUpdate = "Noise:${blocks.size}"
+            return
+        }
 
         val update = tracker.onOcrResult(blocks, size, now, startedAtMs, lastHandRegion)
         // The only point at which what OCR has read can change.
@@ -826,7 +886,10 @@ class LiveAssistPipeline(
             )
         }
 
-        val boxOnScreen = ScreenSpace.toScreen(screen, target.box)
+        // Centred rather than corner-bounded: the bounding-box form inflates a wide, short
+        // label's height under a tilted view, and that inflation becomes a taller on-target
+        // zone — the app announcing arrival before the finger is there. See ScreenSpace.
+        val boxOnScreen = ScreenSpace.toScreenCentred(screen, target.box)
         val tipOnScreen = fingertip?.let { tip ->
             ScreenSpace.toScreen(screen, Point(tip.x, tip.y))
                 ?.let { FingertipPoint(it.x, it.y, tip.confidence) }
@@ -889,6 +952,9 @@ class LiveAssistPipeline(
         }
         screenTracker.onDetection(inFrame, now)
         latestScene = currentScene(now)
+        var total = 0L
+        for (value in luminanceScratch) total += value
+        lastFrameLuminance = total.toFloat() / luminanceScratch.size
     }
 
     /**
@@ -1305,8 +1371,18 @@ class LiveAssistPipeline(
         steady: Boolean,
         handMs: Long,
         now: Long,
+        guidance: GuidanceInput,
     ) {
         val target = tracker.target
+        val screen = screenTracker.geometry(now)
+        // Round-tripped through the same homography guidance used: screen space and back.
+        val guidanceBox = screen?.let { s -> guidance.target?.box?.let { ScreenSpace.toFrame(s, it) } }
+        val guidanceTip = screen?.let { s ->
+            guidance.fingertip?.let { tip ->
+                ScreenSpace.toFrame(s, Point(tip.x, tip.y))
+                    ?.let { FingertipPoint(it.x, it.y, tip.confidence) }
+            }
+        }
         listener.onDebugFrame(
             DebugFrame(
                 frame = frame.size,
@@ -1342,6 +1418,19 @@ class LiveAssistPipeline(
                 screenSignatureDistance = lastSignatureDistance,
                 focusState = focusState,
                 sharpness = sharpness,
+                frameId = frameId,
+                handLandmarks = handTracker?.lastLandmarks,
+                handMiss = handTracker?.lastMiss,
+                handInferences = handTracker?.inferences ?: 0L,
+                handsSeen = handTracker?.handsSeen ?: 0L,
+                frameLuminance = lastFrameLuminance,
+                screenQuad = screen?.quad,
+                screenConfidence = screen?.confidence ?: 0f,
+                screenStable = screen?.stable == true,
+                screenAgeMs = screen?.ageMs,
+                geometryVersion = screen?.version ?: 0L,
+                guidanceTargetBox = guidanceBox,
+                guidanceFingertip = guidanceTip,
                 referenceSharpness = referenceSharpness,
             ),
         )
@@ -1397,6 +1486,15 @@ class LiveAssistPipeline(
          * repositioned, far slower than the frame rate, which the hand tracking owns.
          */
         const val SCREEN_DETECT_INTERVAL_MS = 220L
+
+        /**
+         * Lines above which a run is treated as noise rather than a screen.
+         *
+         * A kiosk screen shows a few dozen lines at most; the densest real scene measured in
+         * this project produced 80-114. The limit sits well above that, so it rejects only
+         * results that cannot be a screen at all.
+         */
+        const val MAX_PLAUSIBLE_LINES = 200
         const val SIGNATURE_INTERVAL_MS = 200L
 
         /** Mean absolute luminance change, outside the hand, that brings an OCR run forward. */

@@ -4,6 +4,7 @@ import com.maranella.kioskvision.assist.TextBox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -165,4 +166,91 @@ class ScreenTrackerTest {
         assertTrue(ScreenSpace.isOnScreen(Point(1.01f, 0.5f)))
         assertFalse(ScreenSpace.isOnScreen(Point(1.5f, 0.5f)))
     }
+
+    // --- geometry versioning -----------------------------------------------------------------
+
+    @Test
+    fun `continuing to track the same screen keeps the geometry version`() {
+        val tracker = ScreenTracker()
+        tracker.onDetection(candidate(quad()), nowMs = 1_000L)
+        val first = tracker.geometry(1_000L)!!.version
+
+        tracker.onDetection(candidate(quad(offsetX = 15f)), nowMs = 1_100L)
+        assertEquals(
+            "a smoothed continuation is the same screen; results stay comparable",
+            first,
+            tracker.geometry(1_100L)!!.version,
+        )
+    }
+
+    @Test
+    fun `a restarted track gets a new geometry version`() {
+        val tracker = ScreenTracker()
+        tracker.onDetection(candidate(quad()), nowMs = 1_000L)
+        val first = tracker.geometry(1_000L)!!.version
+
+        tracker.onDetection(candidate(quad(offsetX = 600f)), nowMs = 1_100L)
+        val second = tracker.geometry(1_100L)!!.version
+
+        // Anything anchored under the old version describes a screen that is no longer there.
+        assertNotEquals(first, second)
+    }
+
+    @Test
+    fun `reset invalidates the version so nothing from before can be reused`() {
+        val tracker = ScreenTracker()
+        tracker.onDetection(candidate(quad()), nowMs = 1_000L)
+        val before = tracker.geometry(1_000L)!!.version
+
+        tracker.reset()
+        tracker.onDetection(candidate(quad()), nowMs = 2_000L)
+
+        assertNotEquals(before, tracker.geometry(2_000L)!!.version)
+    }
+
+    @Test
+    fun `the centred mapping does not inflate a label's height on a tilted screen`() {
+        val tracker = ScreenTracker()
+        val skewed = Quad(
+            Point(120f, 90f), Point(520f, 130f),
+            Point(560f, 470f), Point(80f, 430f),
+        )
+        tracker.onDetection(candidate(skewed), nowMs = 1_000L)
+        val screen = tracker.geometry(1_000L)!!
+
+        // A wide, short label — the shape of a real kiosk button's text, and the shape the
+        // corner-bounding form handles worst.
+        val raw = TextBox(200f, 180f, 320f, 240f)
+        val cornerBounded = ScreenSpace.toScreen(screen, raw)!!
+        val centred = ScreenSpace.toScreenCentred(screen, raw)!!
+
+        // Both agree on where the label is...
+        assertEquals(cornerBounded.centerX, centred.centerX, 0.02f)
+        assertEquals(cornerBounded.centerY, centred.centerY, 0.02f)
+
+        // ...and disagree on how tall it is, which is what sizes the on-target zone. The
+        // corner form was measured 38% taller; the centred form must be close to the true
+        // extent, so the zone no longer announces arrival early.
+        assertTrue(
+            "centred height ${centred.height} should be well under corner-bounded ${cornerBounded.height}",
+            centred.height < cornerBounded.height * 0.85f,
+        )
+        assertTrue("width should barely differ", centred.width > cornerBounded.width * 0.9f)
+    }
+
+    @Test
+    fun `on a square-on screen the two mappings agree`() {
+        // No perspective, no spread: the distinction must cost nothing in the ordinary case.
+        val tracker = ScreenTracker()
+        tracker.onDetection(candidate(quad()), nowMs = 1_000L)
+        val screen = tracker.geometry(1_000L)!!
+
+        val raw = TextBox(200f, 180f, 320f, 240f)
+        val cornerBounded = ScreenSpace.toScreen(screen, raw)!!
+        val centred = ScreenSpace.toScreenCentred(screen, raw)!!
+
+        assertEquals(cornerBounded.width, centred.width, 1e-3f)
+        assertEquals(cornerBounded.height, centred.height, 1e-3f)
+    }
+
 }
