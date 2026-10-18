@@ -1,0 +1,106 @@
+/* Localizable.strings (Base — English, sole supported language)
+ *
+ * Keys mirror Android `app/src/main/res/values/strings.xml`.
+ * Georgian localization intentionally removed; all user-facing
+ * output is English. Kiosk-screen OCR is a separate concern and
+ * remains Georgian via Tesseract.
+ */
+
+"camera_preview_description" = "Live view from the rear camera";
+
+/* Camera permission */
+"permission_needed_title" = "KioskVision needs the camera";
+"permission_needed_message" = "The camera lets us see the terminal screen and help you find the button you need. After you continue, iOS will ask you to allow camera access.";
+"permission_denied_title" = "Camera access was not allowed";
+"permission_denied_message" = "Without the camera, KioskVision cannot see the terminal screen. Select Try again, and in the iOS window choose to allow camera access.";
+"permission_blocked_title" = "Camera access is turned off";
+"permission_blocked_message" = "iOS will no longer ask for camera access. Select Open settings, open Privacy, then Camera, and allow access. Then return to KioskVision.";
+
+/* Camera status */
+"status_camera_starting" = "Starting camera…";
+"status_camera_on" = "Rear camera is on.";
+"status_camera_missing" = "No rear camera was found on this device.";
+"status_camera_busy" = "The camera is being used by another app. KioskVision will try again automatically.";
+"status_camera_disabled" = "The camera is disabled on this device by a setting or device policy.";
+"status_camera_failed" = "The camera could not be started.";
+
+/* Generic actions */
+"action_continue" = "Continue";
+"action_try_again" = "Try again";
+"action_open_settings" = "Open settings";
+"action_not_now" = "Not now";
+
+/* Live assist UI */
+"action_voice_command" = "Start listening";
+"action_cancel_listening" = "Listening. Tap to stop.";
+"action_repeat" = "Repeat";
+"action_stop_guidance" = "Stop guidance";
+"action_rescan" = "Read screen again";
+"action_debug_overlay" = "Developer overlay";
+"status_listening" = "Listening… say what you want.";
+"label_heard" = "Heard: %1$@";
+"label_target" = "Target: %1$@";
+"label_guidance" = "Guidance: %1$@";
+"label_target_reached" = "At the button. You press it yourself.";
+"hint_hold_steady" = "Keep the kiosk screen in view, facing it straight on.";
+"status_engines_loading" = "Preparing text and hand recognition…";
+
+/* Capability warnings */
+"warning_ocr_unavailable" = "Text recognition could not start on this device.";
+"warning_hand_unavailable" = "Hand tracking could not start on this device.";
+"warning_speech_output_unavailable" = "Spoken output is not available on this device. Messages are shown on screen.";
+"warning_recognition_unavailable" = "Speech recognition is not available on this device.";
+
+/* Microphone permission */
+"mic_permission_title" = "Microphone for voice commands";
+"mic_permission_message" = "KioskVision listens so it can hear which button you want. The app does not save recordings. After you continue, iOS will ask you to allow microphone access.";
+"mic_denied_title" = "Microphone access was not allowed";
+"mic_denied_message" = "Without the microphone, voice commands cannot work. The camera keeps working. Select Try again, and in the iOS window choose to allow microphone access.";
+"mic_blocked_title" = "Microphone access is turned off";
+"mic_blocked_message" = "iOS will no longer ask for microphone access. Select Open settings, open Privacy, then Microphone, and allow access. Then return to KioskVision.";
+
+/* Spoken by the app */
+"speak_direction_left" = "A bit left.";
+"speak_direction_right" = "Slightly right.";
+"speak_direction_up" = "Slightly up.";
+"speak_direction_down" = "A bit down.";
+"speak_direction_near" = "Slowly, you are close.";
+"speak_direction_on_target" = "Stop, you are at the button. You can press it.";
+"speak_hand_not_detected" = "I can't see your hand. Move your whole hand into view, closer to the kiosk screen than to the phone.";
+"speak_target_selected" = "Found %1$@. Bring your index finger to the screen.";
+"speak_target_selected_critical" = "Found %1$@. Before pressing, check the details: say, what is on the screen.";
+"speak_target_not_found" = "I couldn't find %1$@ on the screen.";
+"speak_target_ambiguous" = "Which one: %1$@ or %2$@?";
+"speak_screen_contents" = "On the screen: %1$@.";
+"speak_screen_some_unreadable" = "Some text could not be read reliably.";
+"speak_no_text_visible" = "I can't see any text. Point the camera at the screen.";
+"speak_ocr_not_ready" = "Text recognition is not ready.";
+"speak_screen_changed" = "The screen changed.";
+"speak_screen_out_of_focus" = "The screen is blurred. Change the camera angle slightly.";
+"speak_cannot_read_text" = "I cannot read the text. Move a little closer to the screen.";
+"speak_target_uncertain" = "Cannot point to the button right now.";
+"speak_target_position_lost" = "I have lost where the button is. Keep the kiosk screen in view.";
+"speak_screen_not_tracked" = "I cannot see the kiosk screen clearly. Point the phone at it.";
+"speak_reading_screen" = "Checking the screen.";
+"speak_hold_still" = "Let me see the screen for a moment.";
+"speak_guidance_stopped" = "Guidance stopped.";
+"speak_not_understood" = "I didn't understand. Try again.";
+"speak_recognition_no_speech" = "I didn't hear anything.";
+"speak_recognition_network" = "Speech recognition needs an internet connection.";
+"speak_recognition_unavailable" = "Speech recognition is not available on this device.";
+"speak_recognition_permission" = "Microphone access is needed for voice commands.";
+"speak_recognition_failed" = "Speech recognition failed. Try again.";
+
+/* Voice assistant (Gemini) consent */
+"action_assistant_on" = "Assistant on — microphone streaming. Tap to stop.";
+"action_assistant_off" = "Start the assistant (sends voice over the internet)";
+"assistant_consent_title" = "Use the voice assistant?";
+"assistant_consent_body" = "The assistant understands free English speech, so what you say is sent to Google to be understood. Camera images, the text read from the kiosk screen, and your finger position never leave this phone.\n\nWithout it the app still works: it recognises short spoken commands on the phone itself, reads the screen, and guides your finger. You can change this later.";
+"assistant_consent_accept" = "Use the assistant";
+"assistant_consent_decline" = "Keep everything on this phone";
+
+/* Target offer / goal suggestion */
+"speak_target_offered" = "I have found %1$@. Shall I guide your finger to it?";
+"speak_target_offered_critical" = "I have found %1$@. This one moves money, so tell me whether to guide you to it.";
+"speak_goal_suggestion" = "On this screen I can see %1$@. Shall I guide you to it?";
+"speak_goal_no_match" = "Nothing on this screen matches what you asked for. Tell me what you need.";
