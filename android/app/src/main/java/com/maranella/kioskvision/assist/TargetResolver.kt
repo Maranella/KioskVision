@@ -92,7 +92,15 @@ class TargetResolver(
         if (scene.elements.isEmpty()) {
             return TargetResolution.Unresolved(ResolutionFailure.SceneUnreadable)
         }
-        if (scene.isStale(nowMs, staleLimitMs)) {
+        // Too old to act on, or the kiosk has moved on and no scan has settled it yet. The
+        // second is the case a timestamp cannot catch: `observedAtMs` ages the geometry,
+        // which is re-detected several times a second, while the labels come from OCR. A
+        // scene can look fresh and describe the screen before this one.
+        //
+        // Here rather than at each caller, because every path that turns an intent into a
+        // target comes through this function — selection, the goal carried across screens,
+        // and revalidation at confirmation.
+        if (!scene.describesScreenNow(nowMs, staleLimitMs)) {
             return TargetResolution.Unresolved(ResolutionFailure.SceneStale)
         }
 

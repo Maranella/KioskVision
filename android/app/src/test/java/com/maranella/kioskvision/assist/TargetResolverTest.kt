@@ -40,7 +40,15 @@ class TargetResolverTest {
         labels: List<ObservedLabel>,
         trackedScreen: TrackedScreen? = screen(),
         observedAtMs: Long = now,
-    ) = KioskScene.from(labels, trackedScreen, frameWidth = 400, frameHeight = 400, nowMs = observedAtMs)
+        changeSuspected: Boolean = false,
+    ) = KioskScene.from(
+        labels,
+        trackedScreen,
+        frameWidth = 400,
+        frameHeight = 400,
+        nowMs = observedAtMs,
+        changeSuspected = changeSuspected,
+    )
 
     @Test
     fun `resolves a payment button to screen-relative bounds`() {
@@ -200,6 +208,45 @@ class TargetResolverTest {
         val built = scene(labels(Triple("ა", 0.05f, 1)))
         assertEquals(SceneReadability.Unreadable, built.readability)
     }
+
+    @Test
+    fun `nothing is resolved from a screen the app has evidence has moved on`() {
+        // Every path that turns an intent into a target comes through resolve: selecting one,
+        // carrying a goal to the next screen, and revalidating at confirmation. A scene whose
+        // transition is unsettled must refuse all three — its labels may belong to the screen
+        // before, and `observedAtMs` cannot tell, because it ages the geometry rather than
+        // the text.
+        val changing = scene(
+            labels(Triple("გადახდა", 0.9f, 3), Triple("ბალანსი", 0.9f, 3)),
+            changeSuspected = true,
+        )
+        assertEquals(
+            TargetResolution.Unresolved(ResolutionFailure.SceneStale),
+            TargetResolver().resolve(UserIntent("გადახდა"), changing, now),
+        )
+    }
+
+    @Test
+    fun `the same request resolves once the transition is settled`() {
+        // So the refusal above is the suspicion doing the work, not the fixture.
+        val settled = scene(labels(Triple("გადახდა", 0.9f, 3), Triple("ბალანსი", 0.9f, 3)))
+        assertTrue(TargetResolver().resolve(UserIntent("გადახდა"), settled, now) is TargetResolution.Resolved)
+    }
+
+    @Test
+    fun `a target offered before a transition cannot be revalidated during one`() {
+        val before = scene(labels(Triple("გადახდა", 0.9f, 3), Triple("ბალანსი", 0.9f, 3)))
+        val target = (TargetResolver().resolve(UserIntent("გადახდა"), before, now) as TargetResolution.Resolved).target
+
+        val during = scene(
+            labels(Triple("გადახდა", 0.9f, 3), Triple("ბალანსი", 0.9f, 3)),
+            changeSuspected = true,
+        )
+        assertEquals(
+            TargetResolution.Unresolved(ResolutionFailure.SceneStale),
+            TargetResolver().revalidate(target, during, now),
+        )
+    }
 }
 
 /**
@@ -250,4 +297,5 @@ class ScreenReaderNoiseTest {
         )
         assertEquals(listOf("დენი", "გაზი", "წყალი"), reading.lines)
     }
+
 }

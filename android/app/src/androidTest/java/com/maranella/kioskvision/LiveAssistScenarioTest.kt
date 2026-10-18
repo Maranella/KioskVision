@@ -14,6 +14,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.maranella.kioskvision.assist.FrameSize
 import com.maranella.kioskvision.assist.GuidanceDirection
 import com.maranella.kioskvision.assist.SpokenMessage
+import com.maranella.kioskvision.haptics.HapticCue
 import com.maranella.kioskvision.camera.AnalysisFrame
 import com.maranella.kioskvision.hand.HandLandmarkTracker
 import com.maranella.kioskvision.ocr.KioskOcrEngine
@@ -62,6 +63,7 @@ class LiveAssistScenarioTest {
     private val snapshots = Collections.synchronizedList(mutableListOf<SessionSnapshot>())
     @Volatile private var debug: DebugFrame? = null
     @Volatile private var focusRequests = 0
+    private val haptics = mutableListOf<HapticCue>()
 
     private lateinit var pipeline: LiveAssistPipeline
     private lateinit var hand: Bitmap
@@ -84,6 +86,10 @@ class LiveAssistScenarioTest {
         override fun onFocusRequested() {
             focusRequests++
         }
+
+        // Recorded so the scenario can show the rhythm tracks the spoken cues; the assertions
+        // are about speech and phase, which is what the acceptance criteria are written in.
+        override fun onHaptic(cue: HapticCue) { haptics += cue }
     }
 
     @Before
@@ -92,6 +98,14 @@ class LiveAssistScenarioTest {
             .copy(Bitmap.Config.ARGB_8888, false)
         pipeline = LiveAssistPipeline(DeviceMotionMonitor(appContext), listener)
         pipeline.debugEnabled = true
+        // On, so the pipeline's own diagnostics are exercised rather than merely compiled.
+        // The `ANCHOR`/`OCR` lines are the only window a field capture has into which kind of
+        // scan ran and what it cost, and a log line nobody has seen produce output is a log
+        // line that may not — `describeOcrInput` once crashed the pipeline thread on a device
+        // with IllegalFormatConversionException, and no test would have caught it.
+        //
+        // What they print here is this harness's own rendered text, not a user's kiosk.
+        pipeline.diagnosticsEnabled = true
         pipeline.setOcrEngine(KioskOcrEngine.create(appContext))
         pipeline.setHandTracker(HandLandmarkTracker.create(appContext))
     }

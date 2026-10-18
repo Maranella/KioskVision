@@ -3,11 +3,46 @@
 **Current phase.** Android implementation. No milestone in
 `MVP_AND_ACCEPTANCE_CRITERIA.md` has passed its acceptance criteria yet.
 
-**Date of last update.** 2026-10-16.
+**Date of last update.** 2026-10-17.
 
-**Scale.** ~5,800 lines of Kotlin under `android/`; 130 unit tests and 15
-instrumented tests, all passing. Measurements recorded as R-11 through R-20.
-Last commit `e509c1b`; the voice work below is in the working tree, uncommitted.
+**Scale.** ~11,000 lines of Kotlin under `android/app/src/main`; **346 unit
+tests** and 21 instrumented tests. Measurements recorded as R-11 through R-37.
+Last commit `3016244`; everything since R-27 is **uncommitted working tree**.
+
+**What was verified on 2026-10-17, and what was not.** The unit suite passes in
+full from a clean task state (`--rerun-tasks`: **330 passed, 0 failed, 0
+errors**) and the debug APK builds. A device
+*was* attached for part of the day (Samsung SM-S731B, serial `R5GL75BE33T`) and
+produced the measurements in R-30 and R-32: the acquisition-routing fix, and the
+finding that four of the five amounts on the OCR target were unreadable until
+the image was contrast-normalised. The device was then disconnected, so the
+instrumented suite has **not** been re-run against any change made after that
+measurement. In particular `PriceAssociationTest` — real OCR to a priced drink —
+has only ever been run in its **failing** state, which is what produced R-32;
+the fix it was written to verify has not been through it. R-33's association
+rules, R-34 and R-35 have been seen by unit tests and the compiler only.
+
+**The instrumented suite has now run on hardware (R-37).** 18 passed, 2 failed,
+1 declined for a missing capture. Both failures were real: prices were being
+attached to the *volume* line above them rather than to the drink, on every card
+— a layout the unit fixtures did not have — and the preprocessing comparison had
+stopped measuring anything once production started normalising contrast. Both
+are fixed, and an amount now reaches the right product through real OCR on this
+device for the first time: `ესპრესო=3.50, ამერიკანო=4.00, კაპუჩინო=5.00,
+ლატე=5.00`, all four correct against the published ground truth. The full suite
+has **not** been re-run end to end against the current tree; the USB connection
+dropped three times during the session.
+
+A second validation session (R-36) found the device still disconnected —
+confirmed at the USB and mDNS level, not merely in `adb devices` — and so
+**every instrumented test remains unrun against the current tree**. It closed
+two defects found while preparing that run (a confirmation window the scene's
+own timestamp could not see, and the gate being untestable), hardened the
+consent boundary at both call sites, and left `tools/device-validation.sh`
+ready so the hardware run is one command.
+
+Nothing in this file has been observed at a kiosk, through a camera, by a blind
+user, or with a finger in frame.
 
 ## Completed
 
@@ -54,8 +89,12 @@ Last commit `e509c1b`; the voice work below is in the working tree, uncommitted.
     of being told the button does not exist;
   - autofocus is pointed at the kiosk screen once and held.
 
-  Tests: **130 unit** plus **15 instrumented** on a physical device
-  (Samsung SM-S731B, Android 16, serial `R5GL75BE33T`).
+  Tests at the time of that work: 130 unit plus **15 instrumented** on a
+  physical device (Samsung SM-S731B, Android 16, serial `R5GL75BE33T`). The
+  unit suite has since grown to **245** (246 before R-27 retired a dead
+  arbitration path and its twelve tests). The instrumented suite is now 16 and
+  was last *run* on that device; it did not even compile between the haptics
+  work and R-27.
   Measurements recorded as R-11 through R-17.
 
 - **Georgian voice via Gemini Live** (`android/`, 2026-10-16, uncommitted).
@@ -189,18 +228,65 @@ interchangeable and the third kind can invalidate work on the first.
 
 ### Engineering - known how, not done
 
-- **Kiosk-screen detection.** `camera/FrameGeometry.kt` treats the whole
-  camera frame as the screen: no quadrilateral detection, no homography, no
-  perspective correction. Product M1's framing diagnoses (`OFF_FRAME`,
-  `PARTIAL`, `TOO_FAR`, `OFF_ANGLE`, `GLARE`) do not exist, and every target
-  coordinate downstream is frame-relative, so it is wrong whenever the phone
-  is not square-on to the screen. Largest software gap.
-- **ADR-009** - proposed, unbuilt. Barge-in stays off until it is.
-- **Session rollover.** Live sessions end at ~10 min of connection and ~15 min
-  total; a real transaction can outlast that. Not implemented.
-- **Goal retention across screens** (M5) and **critical-detail readback with
-  explicit confirmation** (M6). These *are* "complete an operation
-  independently", and neither exists.
+**Three entries here were stale and have been corrected.** Kiosk-screen
+detection, M5 and M6 were all listed as absent after they had been built, and
+ADR-009 as unbuilt after it had been made executable. The habit this file warns
+about in `CLAUDE.md` — repeating a phase claim without checking the code — had
+happened to this very list.
+
+- **Kiosk-screen detection — built** (commit `f6a4e12`, R-21).
+  `camera/ScreenDetector.kt` (Otsu threshold, flood fill, convex hull, four
+  dominant corners), `ScreenTracker.kt` (smoothing, jump rejection, staleness,
+  versioning), `Homography.kt` (four-point solve and inverse) and
+  `ScreenSpace.kt` (the one conversion point). Guidance runs in rectified
+  screen space and refuses with `GuidanceUnavailable.ScreenNotTracked` rather
+  than falling back to camera pixels. `FrameGeometry.kt` no longer approximates
+  the screen.
+
+  Still open inside this: M1's framing diagnoses (`OFF_FRAME`, `PARTIAL`,
+  `TOO_FAR`, `OFF_ANGLE`, `GLARE`) are **not** implemented — `ScreenLoss` names
+  four reasons geometry is unusable, which is not the same vocabulary. The
+  detector has never been tested against a window, a ceiling light or a glossy
+  reflection. And detection runs on a 64×64 luminance grid, so corner
+  quantization is ~11 px across and ~20 px down on a 720×1280 frame — the same
+  order as the on-target zone (`ZONE_FLOOR_OF_DIAGONAL`, ~2.1 % of the screen).
+  Raising the detector's grid is cheap (one detection measured at 0.35 ms on a
+  development machine, run every 220 ms) and has **not** been done.
+
+- **ADR-009 — executable, still formally `proposed`.** `VoiceBoundaryTest`
+  reflects over `VoiceProvider` and `VoiceSessionReport` and fails the build if
+  either grows a member naming a perception type, with a fourth test that
+  checks the checker. The ADR's status line has not been moved from `proposed`;
+  that is a documentation decision, not missing code. Barge-in remains off.
+
+- **M5 (goal across screens) and M6 (offer before guiding) — built** (R-26,
+  commit `3016244`). `TaskGoal` carries the user's own words, the role, the
+  labels already visited and a five-minute expiry; `selectTarget` returns
+  `needsconfirmation` and guidance begins only on `confirm_target`. **M6 is
+  only partly met**: the control is named and its criticality stated, but the
+  amount on screen is *not* read back as part of the offer, which is what the
+  acceptance criterion asks for. Neither path has been exercised at a kiosk.
+
+- **Session rollover — handled, unverified** (R-27). `LiveServerGoAway` is read
+  from the Live stream and treated as a planned rollover: reconnect after
+  250 ms, no charge against the retry budget. An unwarned drop backs off by
+  doubling and gives up after four attempts, and giving up is **spoken**
+  („ხმოვანი ასისტენტი მიუწვდომელია…") rather than leaving the app silent with a
+  button that still says "listening". None of this has been seen on a device:
+  it needs a session held past ten minutes, and one failed on purpose.
+
+- **Voice reliability — the four unreachable subsystems** (R-27). An audit found
+  `ReconnectPolicy`, `SpeechCommandRecognizer`, `CommandParser` and the
+  coordinator's model-arbitration path all written, tested and **never called
+  from production**. Reconnect is now wired; the coordinator's dead path is
+  removed; the two local-command components are kept and documented as dormant,
+  because reviving them means deciding microphone ownership first.
+
+  **There is still no offline command path.** Every spoken instruction, "stop"
+  included, needs a network round trip, and while the app is speaking a
+  direction the microphone is paused so the word is discarded unheard. The
+  on-screen Stop button is the only network-independent stop, and the only one
+  that should be described as reliable.
 
 ### Unknown risk - needs measurement before it can be designed around
 
@@ -227,6 +313,43 @@ interchangeable and the third kind can invalidate work on the first.
   No amount of code closes this. The honest resolutions are a hardware change
   or a product change - for example guiding by screen region ("lower right
   quarter") rather than by fingertip.
+
+## Added on 2026-10-17, after R-30
+
+Four defects and one capability, all in the working tree, none committed.
+
+- **R-31. Declining the assistant started the assistant.** The voice button read
+  whether consent had been *asked*, never the answer, so "keep everything on
+  this phone" still streamed the microphone to Google — and the press that
+  declined consent opened the session it declined. Routing is now one pure,
+  tested function (`speech/VoiceRouting.kt`), and declining opens the on-device
+  command path that the consent text had been promising all along. That path
+  (`SpeechCommandRecognizer`, `CommandParser`) existed, was tested, and had
+  never been called. **It has not been exercised on a device.**
+- **R-32. The prices were the only text the app could not read.** Measured on
+  the SM-S731B: 42 lines read from the OCR target, one amount. Amber on cream
+  is a strong colour difference and a weak luminance one. Grayscale with a
+  percentile-clipped histogram recovers 5 of 5 for +14 ms; 2x recovers the same
+  for +317 ms. The cheap one is now applied to every OCR input
+  (`ocr/OcrPreprocess.kt`).
+- **R-33. Prices are attached to options, or to nothing.** `OptionPricing` pairs
+  an amount with an option only when the geometry leaves little room for another
+  reading, and the app answers "which is cheaper" in its own voice. The model
+  asks and is told `comparing`; it still learns no amount, no label and no
+  position, so ADR-009 is untouched.
+- **R-34. The confirmation gate never re-checked the screen.** `confirmTarget`
+  started guidance from the target as offered. `TargetResolver.revalidate`
+  existed for this, was tested, and was called by nothing.
+- **R-35. Two numbers right in the tests and wrong in production.** The OCR pixel
+  budget was charged to the frame while Tesseract read a crop (cutting re-anchor
+  magnification from 2x to 1.54x), and screen detection shared the change
+  detector's 64x64 grid, quantising a corner to ~11x20 px. Detection now has its
+  own 128x128 grid, at 1.26 ms per run.
+
+**What this does not change.** No kiosk has been visited; no finger has been
+guided; the app's own accessibility is still untested; and the central question
+of R-13/R-07 — whether fingertip guidance is reachable on this hardware at all —
+is exactly where it was.
 
 ## The single recommended next task
 

@@ -1639,6 +1639,799 @@ and the audio coordinator, which is why adding them could not quietly skip eithe
 
 ---
 
+### R-27 — Four subsystems were written, tested, and never called
+
+**Type:** audit + implementation, 2026-10-17. **Unit-tested; no device was attached, so
+nothing here has been heard or seen on hardware.**
+
+An audit of the shipping path found four components that exist, compile and pass tests, and
+that **no production code reaches**. Verified by search before anything was changed:
+
+```
+cd android/app/src && grep -rn "ReconnectPolicy\|handleHypotheses\|\.listen(\|onModelChunk" . | grep -v Test
+```
+
+| Component | Lines | Reached from |
+|---|---|---|
+| `voice/ReconnectPolicy.kt` | 78 | its own test only |
+| `speech/SpeechCommandRecognizer.kt` | 274 | constructed, but `listen()` never called |
+| `assist/CommandParser.kt` | 45 | only `handleHypotheses`, which nothing calls |
+| `AudioOutputCoordinator` model arbitration | ~60 | its own tests only |
+
+This is worse than dead code, because each one is *described* elsewhere as working. R-22 states
+that on giving up "the app falls back to on-device commands"; there was no reconnect path and no
+fallback. Twelve coordinator tests passed against `isModelSpeaking`, which was permanently
+false.
+
+#### The failure the user would have met
+
+`StreamingVoiceProvider` had no reconnection. When the socket closed - which R-24 documents as
+routine on the no-cost tier, and which the documented ~10-minute connection limit guarantees -
+`receive()` threw, the capture loop exited on `!session.isClosed()`, and nothing restarted it.
+`LiveAssistUiState.voice` was **never read by `LiveAssistScreen`**, so there was no text, no
+live region and no spoken message. The assistant stopped existing. The button still said
+"listening".
+
+#### What was built
+
+- **Bounded reconnect.** One supervising coroutine owns connect / run / decide, so two sockets
+  or two `AudioRecord`s cannot coexist; capture is cancelled **and joined** before the next
+  connection opens one. `ReconnectPolicy` is finally constructed in production.
+- **Planned rollover is detected, not guessed.** `LiveServerGoAway` is present in firebase-ai
+  18.0.0 (verified against the AAR with `javap`: `getTimeLeft` returns a nullable
+  `kotlin.time.Duration`). A warned disconnect reconnects in 250 ms and does not spend the
+  retry budget; an unwarned one backs off by doubling and then gives up. This is how the
+  connection limit in `AiConfig` actually arrives, so no timer was invented for it.
+- **Failure is audible.** `SpokenMessage.VoiceAssistantUnavailable`, Georgian and English, says
+  what still works — camera, screen reading and guidance are all local — and `listening` goes
+  false so the UI stops claiming an open microphone.
+
+#### A correction to the audit's own reasoning
+
+`LiveServerGoAway.timeLeft` was first read off the javap signature as non-null, because the
+name mangling `getTimeLeft-FghU774` suggested an unboxed inline class return. The compiler
+disagreed. The signature was evidence about the shape of the method, not about nullability, and
+it was treated as more than it was.
+
+#### Dropped replies: the bug as arithmetic
+
+`speakAssistant` discarded any reply within `DIRECTION_HOLDS_VOICE_MS` (3000 ms) of a spoken
+direction. `GuidanceAnnouncer` repeats the same direction every 2500 ms. **3000 > 2500**, so
+while the app was guiding the window never opened and every reply was dropped, logged only
+under `diagnosticsEnabled`. The user asked a question mid-reach and the app said nothing.
+
+Replies are now **deferred with a deadline** rather than discarded, by
+`AudioOutputCoordinator.decideAssistantReply`, which is pure and tested. The constants are
+anchored rather than guessed: the settle is 800 ms because `GuidanceAnnouncer.MIN_GAP_MS` is
+700 ms — the spacing the app already requires between two of its *own* cues — and the deadline
+is 4000 ms because that is longer than one full repeat cycle, so a reply is abandoned only when
+the channel was genuinely never free. **Neither has been tuned against a device**, and the
+right values depend on how long a Georgian directional phrase takes to speak, which has not
+been measured.
+
+#### Speech turns, and the microphone gap between chunks
+
+`GuidanceSpeechOutput.isSpeaking` was a boolean set by `onStart` and cleared by `onDone`, so
+between two queued utterances it read false and the microphone gate reopened on the app's own
+next sentence. It now tracks the active utterance **id**: a terminal callback for an id that is
+no longer current is ignored, which makes a multi-utterance turn read as one and makes
+`QUEUE_FLUSH` safe. The waiting loops gained a 30 s ceiling, because an engine that never
+reports finishing would otherwise hold the microphone closed for the rest of the session.
+
+#### Stop, and what it honestly is
+
+`onStopPressed` cancelled guidance but left queued speech playing, left the jobs that gate the
+microphone running, and could be followed by an in-flight `select_target` landing and offering
+a target aloud — the app resuming a task the user had just abandoned. Stop now also cancels
+speech and those jobs, and a `userStopped` latch makes the assistant's actions no-ops until the
+user asks for something again.
+
+**A spoken "stop" is not reliable and is not presented as if it were.** It travels to Gemini
+Live and back, and while the app is speaking a direction the microphone is paused and the word
+is discarded unheard. The on-screen button is the only network-independent stop. Restoring a
+local voice stop needs microphone ownership decided first, not `listen()` called:
+`SpeechCommandRecognizer` and `CommandParser` are kept and documented as dormant for exactly
+that reason.
+
+#### Measurement, before any optimisation
+
+No latency change was made. Instrumentation was added so the next decision has numbers:
+frame acquisition and whole-frame cost (`LATENCY frame-acquire` / `frame-total`, beside the
+existing hand / decide / announce-wait), the gap between the first transcription chunk and
+`turnComplete` (how long the app sits on text it already has, because a turn is accumulated and
+only spoken when the server says it is finished), and text-handed-to-engine → first audible
+word.
+
+`OcrLanguageComparisonTest` compares `kat` against `kat+eng` on one tessdata directory and one
+corpus, **interleaved per sample** so thermal drift lands on both arms — R-24's lesson about
+time-separated arms. It reports CER, exact-label rate, Latin-only exact rate and p50/p90, and
+asserts nothing about the winner. **Production remains `kat+eng`.** It has not been run: no
+device was attached.
+
+#### Found while doing this
+
+The instrumented suite **did not compile**. The uncommitted haptics work added `onHaptic` to
+`LiveAssistPipeline.Listener` without updating the two anonymous implementations in
+`HandheldMotionExperimentTest` and `LiveAssistScenarioTest`, so every device test — including
+the end-to-end scenario that is this project's main evidence — was unbuildable. Fixed.
+
+245 unit tests pass (`--rerun-tasks`). The count fell by one because twelve coordinator tests
+covering the removed model-arbitration path were replaced by thirteen covering the policy that
+actually runs.
+
+---
+
+### R-28 — A coffee machine is not a kiosk, and the detector says so silently
+
+**Type:** investigation, 2026-10-17. **Not reproduced.** No frame of the machine — or of any
+real screen — exists in the repository; the only image asset is MediaPipe's `pointing_up.jpg`.
+Everything below is traced from code, and the device capture that would confirm it is specified
+at the end.
+
+#### The bound nobody examined
+
+`ScreenDetector.MIN_COVERAGE` is 0.08: the bright region must fill 8 % of frame **area**. Its
+comment reasons that "a screen smaller than this is too far away to read anyway", which assumes
+a payment terminal.
+
+A phone camera with a ~65° horizontal field sees roughly 52 cm across at 40 cm, so the upright
+9:16 frame covers about 52 × 92 cm. A 10 × 6 cm machine display is 60 cm² of 4784 cm² — **1.3 %**,
+six times under the bound. At 20 cm it reaches only ~5 %, and at that range the user's hand can
+no longer occupy the ~40 % of frame width MediaPipe needs (R-13). **For a small display the
+bound may be unreachable at every working distance that also permits fingertip tracking.**
+
+Unchanged here. Which machines are in scope is a product decision, and moving a threshold before
+a single real frame has been measured is how R-17 happened.
+
+#### Why "cannot read" follows from "cannot detect"
+
+The two symptoms are one chain, not two faults:
+
+1. detector refuses → `ScreenTracker.geometry()` null;
+2. `screenScanRegion` returns null → the full scan reads the **whole frame**, not a crop — the
+   path R-11 measured at 2.6-6.3 s on a real camera scene and 37.6 s on a cluttered one;
+3. `upscaleFor(isRegion = false, …)` calls `OcrUpscale.forLabelHeights(tracker.snapshot…)`, and
+   `snapshot` is empty before any successful run, so it returns 1f. **Acquisition can only
+   magnify after it has already succeeded** — a bootstrap trap, and R-16 measured that 2× is
+   exactly what rescues text below ~20 px, which is what a small display at that distance gives;
+4. nothing readable → `snapshot` stays empty → `onScreenConsistent` requires
+   `snapshot.size >= MIN_INFORMATIVE_LINES` (2) → the phase never leaves `AcquiringScreen`;
+5. a spoken request hits `labels.isEmpty()`, is deferred with „ვკითხულობ ეკრანს", and the retry
+   only fires on `OcrUpdate.Unchanged`, which needs a non-empty previous run. **The app says it
+   is reading the screen and then goes quiet for ever.**
+
+#### OCR never sees a rectified image
+
+Checked exhaustively: the only `drawBitmap` calls in the app are the 64×64 scratch downscale and
+the analyzer's upright rotation (an affine). `ScreenSpace` exposes point and box conversions
+only — no bitmap. `screenScanRegion` produces an **axis-aligned bounding box of the quad**, and
+`KioskOcrEngine` applies it with `setRectangle` on the unrectified frame.
+
+The homography corrects *coordinates* for guidance and nothing else. Text skewed by viewing
+angle reaches Tesseract skewed, and the bounding box of a rotated quad also feeds it a wedge of
+surrounding scene. Head-on at a terminal this costs little. A machine display at chest height,
+leaned over, is the case where it costs most — and it is untested either way.
+
+#### Also: many machines have no text
+
+`TargetMatcher` matches recognised **text**. A pictogram-and-button coffee machine may present
+almost none, in which case every stage above is working correctly and the product still cannot
+help. Worth settling before any detector work.
+
+#### What was changed
+
+Diagnostics only; no algorithm, no threshold.
+
+`ScreenRejection` (`NoThreshold`, `NoBrightRegion`, `TooSmall`, `TooLarge`, `HullTooSmall`,
+`NoCorners`, `DegenerateQuad`) with the measured coverage and the three confidence parts, all
+recorded during `detect` and read by nothing that makes a decision. Surfaced in `DebugFrame`,
+in the overlay, and in two 1 Hz logcat lines (`SCREEN`, `ACQUIRE`) that carry **no recognised
+text** — that is screen content and stays in `blocks`, which only a debuggable build renders.
+`SmallScreenDetectionTest` pins the refusal reason, and also records two behaviours nobody had
+written down: a dark display in a bright room is detected *as the room*, and a specular
+highlight larger than the display wins the largest-component contest.
+
+---
+
+### R-29 — The overlay showed OCR output after the filter, so two opposite failures looked the same
+
+**Type:** investigation, 2026-10-17. **Not reproduced**; no captured frame of the machine
+exists. Diagnostics only — no threshold, no language, no algorithm changed.
+
+The machine's screen is now detected, and its text still is not read. Three gates can produce
+that, and the existing diagnostics could not tell them apart.
+
+#### `DebugFrame.blocks` is the post-filter snapshot
+
+`blocks = tracker.snapshot`, and `snapshot` is what survived
+`confidence >= MIN_RETAINED_CONFIDENCE && letterCount(text) >= 2`. So "Tesseract read nothing"
+and "Tesseract read the screen and the app discarded it" were **the same observation**, with
+opposite fixes. Raw output, the retained count and a per-block rejection reason are now carried
+beside it.
+
+#### `letterCount` counts letters, not digits
+
+A screen whose controls are numerals — a cup size, a temperature, a price — loses all of them
+at intake: `250`, `1`, `80°`, `1.50` are each under the two-letter floor. Correct for a payment
+terminal, whose controls are words. An open question for a coffee machine, and **not changed**:
+it needs a real frame and a measured recognition rate.
+
+#### `screenScanRegion` refuses a wide, short screen
+
+The crop is dropped unless its bounding box is at least a quarter of the frame **in both
+axes**. A display at 45 % wide and 18 % tall passes detection at 8.1 % area and still fails the
+height guard, so the scan falls back to the whole frame — the path R-11 measured at 2.6-6.3 s —
+and `upscaleFor(isRegion = false, …)` then returns 1× because `snapshot` is empty. The overlay
+now prints `scan WHOLE FRAME at 1.0x`, which names this in one glance.
+
+#### Confirmed: OCR is given the crop, never a rectified image
+
+Exhaustive check — the only `drawBitmap` calls are the 64×64 scratch downscale and the
+analyzer's upright rotation (affine). `ScreenSpace` has no bitmap overload. The homography
+corrects coordinates for guidance and nothing else, so text skewed by viewing angle reaches
+Tesseract skewed.
+
+#### What was added
+
+`KioskOcrEngine.dumpNextInput` writes the exact image Tesseract reads — after crop, after
+magnification — to app-private storage, once, on a debuggable build, armed by turning the
+developer overlay on. Every OCR investigation so far has been blocked by not having that image.
+
+`OcrPreprocessingComparisonTest` runs the production engine over that dump under one
+transformation at a time (baseline / grayscale + percentile-clipped contrast / adaptive mean
+threshold / 2×) and reports p50, raw block count and retained count. It **skips** without the
+asset rather than substituting a rendered stand-in, which would answer a different question.
+
+`OcrIntakeFilterTest` characterises the filter; `TargetTracker.isRetainable` and `rejectionFor`
+are now the single definition both the behaviour and the overlay use, so they cannot drift.
+
+256 unit tests pass.
+
+---
+
+### R-30 — Screen detection silently broke OCR acquisition, and the counters proved it
+
+**Type:** defect + fix, 2026-10-17. **Confirmed on the physical SM-S731B, before and after.**
+
+`maybeStartOcr` decided whether a run was a re-anchor with `region != null`. That proxy was
+correct until `f6a4e12` taught a full scan to crop itself to the detected screen. From then on
+**every acquisition scan was counted and dispatched as an anchor**:
+
+- `ocrJobsStarted` and `acquisitionRuns` never incremented, so acquisition could never complete;
+- `lastOcrStartMs` was never updated, so `OCR_MIN_INTERVAL_MS` and the acquisition back-off
+  never engaged and OCR ran unthrottled;
+- the result went to `onAnchorResult`, which with no target returns `NoTarget` and **returns
+  without touching `tracker.snapshot`** — the recognised text was discarded.
+
+The screen was detected throughout. The app simply never learned what was on it.
+
+#### Measured on the device
+
+| | before | after |
+|---|---|---|
+| full scans counted | `ocr=0ms/0` | `ocr=507ms/41` |
+| runs mislabelled as anchors | `anchor=516ms/58` | `anchor=0ms/0` |
+| lines reaching the tracker | `lines=0/2` | `lines=14/2` … `24/2` |
+| last OCR outcome | `Anchor:NoTarget` | `Unchanged` |
+| phase | stuck in `AcquiringScreen` | `AcquiringScreen -> ScreenReady  lines=14  textPx=16` |
+
+Acquisition completing on this hardware had never been observed before.
+
+#### The fix
+
+`val isAnchorRun = due == OcrKind.Region` — the decision already existed; it was simply not
+used. `region != null` is kept for `upscaleFor`, because magnification depends on how much
+image is read, which really is a property of the crop: the device log confirms a cropped full
+scan still runs at `@2.0x`.
+
+#### Why no test caught it
+
+`LiveAssistScenarioTest` paints a full-white frame, so no quadrilateral is found,
+`screenScanRegion` returns null and the old proxy stayed accidentally correct — the test could
+not reach the bug. `OcrAcquisitionRoutingTest` renders a **bright panel inset on a dark
+surround**, asserts the crop is actually taken before anything else so it cannot pass vacuously,
+then checks the counter, the snapshot and the dispatch. Reinstating the bug on the device made
+it fail with `acquired=false phase=AcquiringScreen lines=0`, which is the production symptom
+exactly; restoring the fix made it pass.
+
+#### Noted, not acted on
+
+With a hand-held phone on a changing scene the screen-change trigger fires often, so after
+`ScreenReady` full scans still run roughly every 0.5-1.5 s against a 250 ms floor. That is now
+*bounded*, where before it was not, but whether the trigger is too eager is a separate tuning
+question needing its own measurement.
+
+256 unit tests and 2 instrumented tests pass.
+
+---
+
+### R-31 — Declining to use the assistant started the assistant
+
+**Type:** defect + fix, 2026-10-17. **Confirmed by reading the shipping path**; the microphone
+behaviour itself has not been re-observed on a device since the fix.
+
+The consent dialog offers two answers. „ყველაფერი ამ ტელეფონში დარჩეს" — keep everything on
+this phone — saved `assistantEnabled = false`, and then:
+
+```kotlin
+// onVoiceCommandPressed, before
+!voicePreferences.hasChosen -> showAssistantConsent()
+else -> startListening()        // StreamingVoiceProvider -> Gemini Live
+```
+
+`hasChosen` asks whether the user was *asked*, never what they answered. `assistantEnabled` was
+read in exactly one place — inside `handleHypotheses`, which no production code reached, the
+same shape as every component in R-27. So a user who declined had their microphone streamed to
+Google on the next press, and `onAssistantConsent` ends by re-entering this routine, which
+means **the press that declined consent opened the session it was declining**.
+
+Two further statements were false for the same reason. `LiveAssistUiState.voiceMode` — whose
+own documentation calls it an invariant, "exactly one may hold it" — was never assigned by
+anything, so it read `LocalCommands` while the app streamed, and the button therefore never
+showed `action_assistant_on` („microphone streaming"). A blind user was told "Listening" in
+both modes.
+
+#### What was built
+
+`speech/VoiceRouting.kt`: one pure function from (listening, permission, hasChosen,
+assistantEnabled, liveAvailable) to one of five actions, and `VoiceRoutingTest` pins it —
+including the two cases above, stated as what they are, decisions about whether the user's
+voice leaves the device.
+
+Declining now opens the **on-device** path instead of nothing: `SpeechCommandRecognizer`,
+`CommandParser` and `handleHypotheses` were written, tested and dormant (R-27 kept them
+deliberately), and the reason given for leaving them dormant — microphone ownership — is
+settled by routing, because the two paths are alternatives that can never run at once. That
+also restores what the consent text had been promising all along: "it recognises short spoken
+commands on the phone itself".
+
+R-25 removed the *looped* push-to-talk, and this does not bring it back: one turn per press.
+The loop's defect was the system recogniser's 800 ms silence cut-off and its tone on every
+restart, neither of which a single press has.
+
+A session that gives up reconnecting now falls back to the same local path
+(`liveAvailable = false`) rather than leaving a button that reopens a socket known to be dead.
+
+#### The gate the revived path would have skipped
+
+`handleHypotheses` sent a recognised target straight to `pipeline.selectTarget`, which begins
+guidance and announces it. That was written before M6, which says a control is **offered** and
+nothing moves until the user agrees — and a user who declined the streaming assistant is owed
+that gate most of all, because the screens where it matters are the ones with money on them.
+The local path now goes through the same `AssistantActions.selectTarget` the model calls, so
+both paths offer first.
+
+Which needed a local word for "yes". `CommandParser` gained `Confirm` and `Cancel`, checked
+before the target query so that „დიახ" is an answer to the app rather than a label to hunt for
+on the kiosk — and „სხვა მინდა" cancels instead of searching for a button called „სხვა", which
+on a payment terminal exists. `LocalReply` turns the outcome of an action into a sentence,
+because with no assistant present nobody else would: the actions answer in `ToolOutcome`s,
+which are words for a model, and a user who hears nothing cannot tell a refusal from a crash.
+
+**Not verified on a device.** What is verified is that the decision is now made from the user's
+answer, by a test that fails if it stops being.
+
+---
+
+### R-32 — The prices were the only text on the screen the app could not read
+
+**Type:** measurement + fix, 2026-10-17. **Confirmed on the physical SM-S731B**, before and
+after, against `assets/ocr_test/coffee_machine_screen.png` and its published ground truth.
+
+Reading the target at 1920 px wide, Tesseract returned 42 lines: every drink name in Georgian
+and English, both volumes, the stepper values, the title, the clock. Of the five amounts on the
+screen it returned **one**.
+
+The amounts are the one kind of text there printed in an accent colour — amber on cream. That
+is a large colour difference and a small luminance difference, and luminance is all a
+binarisation sees. The drink names are near-black on the same cream and were never in doubt.
+
+| image | cost | amounts read |
+|---|---|---|
+| untouched | 393 ms | **2 of 5** |
+| grayscale + percentile-clipped contrast | 407 ms | **5 of 5** |
+| 2x magnification | 710 ms | 5 of 5 |
+| both | 690 ms | 5 of 5 |
+
+(at 1280 px, the realistic framing from the asset's README; `PriceLegibilityTest` is the harness
+and asserts only that *some* transformation beats the untouched image.)
+
+Contrast normalisation and magnification recover the same text here and one of them costs
+twenty times more. So `ocr/OcrPreprocess.kt` now runs on every OCR input: grayscale, histogram
+stretched between the 2nd and 98th percentile, so a specular highlight — normal on a glossy
+kiosk screen — cannot define the white point. Magnification keeps its own separate job, text
+that is too *small* rather than too faint (R-16); the two are not substitutes.
+
+`KioskOcrEngine.recognize` was restructured around it. Every run now prepares one image — crop,
+normalise, magnify — and hands Tesseract exactly that. `setRectangle` on the original frame is
+gone, because preprocessing has to see the crop's own histogram: a bright screen in a dark room
+must be stretched by what is on the screen, not by the room. The region rectangle is also
+clamped to the bitmap now; it arrives from screen geometry, and reading past the edge throws,
+which the pipeline would have reported as "OCR found nothing" — indistinguishable from a dark
+screen.
+
+#### The case the fix could have broken
+
+Percentile clipping is a trap on an image whose text covers less than the clipped tail — a
+kiosk screen with a few words on a plain background. Both percentiles then land *inside the
+background*, the span collapses to the background's own grain, and stretching it turns grain
+into ink and the words into nothing. Checked on the JVM rather than reasoned about:
+`OcrPreprocessTest` builds a page with 1 % ink and asserts the text is still 100 levels darker
+than the paper afterwards. Below `MIN_SPAN` (40 of 255) the image is converted to grayscale and
+left alone, which is what Tesseract would have done to it anyway. Amber against cream is about
+100 levels apart, so the case this exists for is far clear of the guard.
+
+#### What OCR does to ₾
+
+Never once returned correctly. Across the five amounts: `3.50 C`, `4.00 დ`, `5.00 &`, `5.00 ©`,
+`8.50 C`. A parser that insisted on U+20BE would have discarded every price on the screen, so
+`MoneyParser` accepts a decimal number followed by at most **one** unexplained character.
+Two or more is a unit — „150 მლ" is not an amount — and that single character is the whole
+distance between the two.
+
+---
+
+### R-33 — A price belongs to a drink only when the layout says so
+
+**Type:** implementation, 2026-10-17. **Rules unit-tested only.** `PriceAssociationTest` runs
+them over text real Tesseract produced from the target, and has so far only been run in its
+failing state — the run that produced R-32, before the preprocessing fix existed. The device
+was disconnected before it could be run again, so *that an amount reaches the right drink
+end to end on this hardware is not yet verified.* What is verified on the device is the half
+below it: with the new preprocessing, all five amounts are recognised.
+
+"რომელია უფრო იაფი?" could not be answered at all. The model is given no screen data by
+construction (ADR-009), and the device had no notion of an amount belonging to an option — OCR
+produced a flat list of lines.
+
+`OptionPricing` pairs them, and the interesting part is what it refuses. An amount is attached
+to an option only when the amount is written like money, was read confidently enough to be
+spoken as a number (0.8, or 0.6 corroborated across runs — the R-12 rule, from a higher floor
+because a misread digit sounds exactly like a right one), the option is a trustworthy line of
+words that is **not** a recognised control, the option sits directly above the amount in its
+column or immediately left of it on the same row, and the runner-up candidate is clearly
+farther away. Two options equally close to one amount is precisely where a guess is wrong half
+the time, so neither gets it.
+
+Controls are excluded outright. „გაგრძელება 5.00 ₾" would be heard as the cost of continuing,
+which is a claim about what the kiosk will do.
+
+The answer is spoken by the app, from `SpokenMessage.CheaperOption` / `OptionPrice`, in lari
+and tetri rather than as "3.50" — a Georgian voice reads a decimal as a number, and a blind user
+cannot tell which was meant. The model calls `compare_prices` with the user's own words and is
+told `comparing` or `priceunknown`. It learns no amount, no label and no position, so ADR-009
+is untouched: the boundary moved zero and the capability is new.
+
+---
+
+### R-34 — The confirmation gate never re-checked the screen
+
+**Type:** defect + fix, 2026-10-17. Found by audit; `TargetResolver.revalidate` was already
+unit-tested.
+
+M6 offers a control and waits: nothing is guided to until the user says yes. Saying „დიახ"
+takes a second or two, and a kiosk can advance in that time — on a timeout, on a card going in,
+or because the previous press went through. `confirmTarget` started guidance from the target as
+it had been **offered**, without looking at the screen again.
+
+`TargetResolver.revalidate` exists for exactly this, carries `sceneObservedAtMs` for exactly
+this, and was reached by no production code — R-27's pattern for the fourth time in this
+repository, and this time on the gate that stands between a user and a finger sent to where a
+button used to be.
+
+It is now called. A control that no longer matches withdraws the offer and says so in the app's
+own voice („ვერ ვპოულობ…", hold still, or cannot read the screen, depending on *why*), and the
+model is told the matching outcome. The mapping from a resolution failure to that outcome is one
+function now (`ResolutionFailure.asOutcome`), shared by both paths, so "it is not on this
+screen" and "I cannot read the screen" cannot drift into meaning the same thing.
+
+---
+
+### R-35 — Two numbers that were right in the tests and wrong in production
+
+**Type:** defect + fix, 2026-10-17. Both found by reading the code against its own tests.
+
+**The pixel budget was charged to the wrong image.** `OcrUpscale.cappedToPixelBudget` bounds
+what Tesseract is given, and `upscaleFor` passed it the **frame** size while recognition read a
+**crop**. On a 720×1280 frame a re-anchor region of 200×60 was therefore cut from 2x to 1.54x —
+on the one path where magnification matters most, because a region run is how a target's
+position stays fresh under blur. `OcrPixelBudgetTest` had always asserted the crop-sized
+behaviour ("a re-anchor crop is a fraction of the frame; 2x of it is cheap and must stay 2x");
+production simply never called it that way. It now passes the region's own dimensions, which
+also lets an acquisition scan cropped to a detected screen magnify — the bootstrap trap R-28
+described, closed without a new rule.
+
+**Screen detection ran on the change-detector's grid.** Both shared one 64×64 downscale, so a
+corner was localised to ~11 px across and ~20 px down on a 720×1280 frame — the same order as
+the on-target zone, as this file has recorded since R-21. The two want different things from
+the frame: the signature asks whether the picture changed, which survives being coarse;
+detection produces the corners. Detection now has its own 128×128 grid, halving that error.
+Measured cost: 1.26 ms per detection against 0.35 ms, every 220 ms, plus one extra downscale
+(`ScreenDetectorCostTest`).
+
+Neither change has been seen at a kiosk, and the second has not been seen through a camera at
+all.
+
+---
+
+### R-36 — Validation attempt without the device, and the two gaps it exposed
+
+**Type:** validation attempt + fix, 2026-10-17 (later session). **The device was not connected
+and nothing here was run on hardware.** Checked at two levels before saying so: `adb devices`
+is empty, `system_profiler SPUSBDataType` shows no Samsung or Android device on USB, and
+`adb mdns services` finds nothing offering wireless debugging. So the blocker is physical, not
+a daemon that needed restarting.
+
+What that means for every claim in R-31 through R-35: the unit-tested half stands, the hardware
+half is still owed. `PriceAssociationTest` — real OCR to a priced drink — **has still only ever
+run in its failing state**, which is the run that produced R-32.
+
+#### Two defects found while preparing the run
+
+**The confirmation gate had a window its own timestamp could not see.** `KioskScene.observedAtMs`
+dates the *geometry*, which is re-detected several times a second. The labels come from OCR,
+which is far slower. So between a kiosk advancing and the next full scan landing, a scene looks
+fresh while listing the previous screen's labels — and `revalidate` would confirm against them
+happily, because they match the offer perfectly. The scene now carries `changeSuspected`, set
+from the screen-change comparison the pipeline already runs (`screenChangeSuspected ||
+pendingScreenChange`), and `ConfirmationGate` refuses while it is set: the user is told the
+screen changed, which is true and actionable. No new threshold was introduced — this is
+existing evidence, not a timer.
+
+This does not close the window entirely, and nothing can: between a screen physically changing
+and the app having any evidence of it, there is nothing to go on. What it removes is the case
+where the app *had* the evidence and confirmed anyway.
+
+**The gate was untestable, so it had no regression test.** `confirmTarget` was decision and
+side effect in one method on an `AndroidViewModel`. The decision is now `ConfirmationGate`, a
+pure function over (offer, scene, clock), and `ConfirmationGateTest` covers the ten cases that
+matter — including the one R-34 was about: a payment screen that has advanced to a PIN prompt
+cannot be confirmed. The ViewModel keeps every side effect and makes no decisions.
+
+#### The consent boundary, hardened where it could be
+
+Step 3 of the validation brief is a device test and remains unrun. What was done without one:
+both production paths to Google now refuse for themselves rather than trusting their callers.
+`startListening` falls back to the on-device path and logs the refusal; `askAssistant` does the
+same. R-31 was not a wrong decision — it was a caller that never asked — so the guard belongs
+at the point where the socket and the microphone are opened, not only at the point where the
+button is pressed.
+
+`VoiceBoundaryTest` grew to cover `AssistantActions`, which had become the widest surface
+between the app and the model and was not checked by it. Three new assertions: no perception
+type in any signature, every action returns a `ToolOutcome` and takes only text, and
+`ToolOutcome` has no instance fields at all — so an outcome cannot acquire a label, a position
+or an amount without the build failing. `compare_prices` is exactly the feature that would
+otherwise have been built by handing the model the amounts.
+
+#### The harness
+
+`tools/device-validation.sh` and `tools/summarise-connected.py`: one command per validation
+step, each capture in its own timestamped directory, device and build recorded beside the
+results so a number in a report can be traced to the run that produced it. It finds `adb`
+itself rather than assuming a PATH, because a validation script that reports "no device" for
+the wrong reason is worse than none.
+
+Both were exercised against a synthetic capture built from the app's own log formats, rather
+than written and left: the summariser parses `LATENCY`, `OCR`, phase transitions and the
+instrumented-test XML, and prints a stage with **no samples** as such instead of omitting it.
+An absent measurement and a fast one must not look the same.
+
+#### One measurement gap closed
+
+Step 6 asks for guidance-decision to first audible word. Every other stage was instrumented;
+that one was not, for directions — only for assistant replies. `speakGuidance` now records it
+through the same `LatencyTracker` and prints it in the same `LATENCY` shape, so one capture
+summarises the whole chain. Measurement only: nothing about what is spoken, or when, changed.
+
+343 unit tests pass from a clean task state. Both APKs build. No instrumented test has been run.
+
+---
+
+### R-37 — The device found what the unit tests could not: a price attached to a volume
+
+**Type:** validation + defect + fix, 2026-10-17 (third session). **Confirmed on the physical
+SM-S731B, Android 16 (sdk 36), fingerprint `S731BXXS8BZG1`.** The USB connection dropped three
+times during the session; what is recorded below ran to completion, and what did not is named
+as such.
+
+#### The full suite, first complete run against R-31…R-36
+
+**18 passed, 2 failed, 1 declined.** The declined one is `OcrPreprocessingComparisonTest`,
+which refuses to run without a captured frame rather than substituting a rendered stand-in —
+working as designed, and reported as a failure only because the summariser was classifying
+`AssumptionViolatedException` as one. Both real failures mattered.
+
+#### The defect: a price belongs to the drink, not to the line above it
+
+`PriceAssociationTest` had never run in a passing state. On the device it produced, verbatim:
+
+```
+width=1920 blocks=49 amounts=5 priced=4 ->
+  150 8c / 150 ml=4.00 &, 40 მლ / 40 ml=3.50 &, 220 მლ / 220 ml=5.00 C, 180 მლ/180 ml=5.00 C
+```
+
+Every amount was recognised, every pairing fired, and every one of them attached the price to
+the **volume**. A product card stacks a name, a translation and a volume above its price, so
+the nearest label above an amount is the volume — and `OptionPricing` chose by distance.
+
+R-33's unit tests did not catch it because their fixtures were cards of a name and a price.
+The rule was tested against the layout it was written from, which is the failure mode a
+synthetic fixture has and a photograph does not.
+
+**Two rules replace distance-alone, both grounded in what is on the screen rather than in a
+threshold:**
+
+- A line containing digits cannot name an option. Volumes, counts, terminal ids and dates are
+  descriptions of a thing, never the thing's name. Kiosk product names do not contain digits.
+- Among the candidates that remain, the most **typographically prominent** tier wins, and
+  distance only separates labels of equal prominence. The drink's name is the largest text on
+  its card — 52 px against 27 for the translation and 22 for the volume — which is how the
+  screen itself says which line is the title. `SAME_TIER` is 0.8, which separates that card
+  cleanly while keeping two names set in the same size competing, because two equal claims on
+  one amount must stay ambiguous and get no price at all.
+
+Verified on the device afterwards, against the ground truth published with the target:
+
+```
+width=1920 priced=4 -> ესპრესო=3.50, ამერიკანო=4.00, კაპუჩინო=5.00, ლატე=5.00
+width=1280 priced=2 -> ესპრესო=3.50, ლატე=5.00
+```
+
+Four of four correct at full size, two of four at the realistic framing — fewer because fewer
+names survive recognition there, not because any pairing was wrong. **This is the first time an
+amount has reached the right product through real OCR on this hardware.**
+
+#### The second failure was the test, not the code
+
+`PriceLegibilityTest` reported `{baseline=5, grayscale+clip=5, 2x=5, both=5}` and failed its own
+assertion. Its "baseline" arm called `KioskOcrEngine.recognize`, which stopped being a baseline
+the moment R-32 taught the engine to normalise contrast: every arm was getting the production
+transformation and the comparison measured nothing. A test that no longer tests what it claims
+is worse than no test, because it is quoted.
+
+The untouched arm now drives `TessBaseAPI` directly, with the app's own model and page
+segmentation mode. Re-measured through the path that actually ships:
+
+| arm | cost | amounts read |
+|---|---|---|
+| untouched raw Tesseract | 407 ms | **2 of 5** |
+| grayscale + percentile clip | 453 ms | 5 of 5 |
+| 2x magnification | 729 ms | 5 of 5 |
+| **production engine** | **423 ms** | **5 of 5** |
+
+R-32's claim, confirmed against the shipping path: **+16 ms, and two amounts become five.**
+
+#### Measured latency, and what it is not
+
+From the one complete suite run (88 OCR runs, 200 frames):
+
+| stage | n | p50 | p90 | max |
+|---|---|---|---|---|
+| OCR run | 88 | 707 ms | 2816 ms | 6865 ms |
+| frame acquisition | 200 | 13 ms | 26 ms | 73 ms |
+| whole frame | 200 | 96 ms | 146 ms | 213 ms |
+| guidance decision | 171 | 0 ms | 0 ms | 1 ms |
+
+**The other three stages produced no usable number and are not reported as if they had.** Hand
+tracking recorded **one** sample across the entire suite, because the instrumented tests feed
+rendered frames rather than a hand in view; `announce-wait` reads 12.8 s at p50, which is an
+artefact of synthetic harnesses holding a direction across long gaps, not anything a user would
+experience; and `speak-start` cannot be attributed to a known session. Camera-to-fingertip and
+decision-to-speech remain **unmeasured**, and measuring them needs a person holding the phone.
+
+#### Three bugs in the validation tooling itself, found by running it
+
+Worth recording because the whole point of the harness is to be trusted. `set -e` killed the
+script when `grep` found no installed package — "not installed" is a state to report, not a
+failure. A comma-separated class filter silently ran only the first class, which nearly
+produced a reported pass the suite had never produced. And the summariser crashed on a
+`<failure/>` carrying neither message nor text. All three were found by using it, which is the
+argument for exercising a tool rather than shipping it.
+
+#### Not verified
+
+The full suite has **not** been re-run end to end against the current tree: the device
+disconnected twice while trying. The two price tests pass individually; the other 18 passed
+before the `OptionPricing` change, which nothing else in the suite exercises. Steps 3, 4 and 6
+of the validation brief — consent through the real UI, a live camera view, and latency from a
+hand-held session — still need a person and a stable cable.
+
+---
+
+### R-38 — The instrumented suite, run class by class on hardware
+
+**Type:** validation, 2026-10-17 (fourth session). **Run on the physical SM-S731B, Android 16
+(sdk 36).** The USB link dropped five times across the session, twice mid-run, which is why
+the suite was finally run one class at a time rather than in one pass. Wireless debugging was
+attempted and is not available: the phone is reachable on Wi-Fi (192.168.79.9) but the Mac
+cannot reach it at all — 100 % packet loss, client isolation on that network.
+
+| class | result |
+|---|---|
+| `LiveAssistScenarioTest` | **PASS** — the project's main end-to-end evidence |
+| `OcrAcquisitionRoutingTest` | **PASS** — the R-30 regression |
+| `PriceAssociationTest` | **PASS** — ესპრესო=3.50, ამერიკანო=4.00, კაპუჩინო=5.00, ლატე=5.00 |
+| `PriceLegibilityTest` | **PASS** — raw Tesseract 2/5 amounts, production engine 5/5 |
+| `OcrUpscaleCostTest` | **PASS** (new) |
+| `ModelsOnDeviceTest`, `OcrMotionDiagnosticTest`, `OcrLanguageComparisonTest` | **PASS** |
+| `OcrPerformanceTest`, `RealKioskEvaluationTest` | **PASS** |
+| `GeorgianOcrAccuracyTest` (x2), `HandVisibilityTest`, `ExampleInstrumentedTest` | **PASS** |
+| `OcrPreprocessingComparisonTest` | **declines** — no captured frame, by design |
+| `HandheldMotionExperimentTest` | **FAIL, cause undetermined** |
+
+#### The one failure, and what is honestly known about it
+
+It **passed** in the first full-suite run of the day and **failed** when run standalone in the
+batch. The device disconnected before it could be re-run to read the metrics it prints —
+retention, clear-label availability, false arrivals, reversals — so *which* of its five gates
+failed is not known.
+
+What is established by reading it: none of this session's changes can reach it. It never
+enables diagnostics (so the new `ANCHOR` line is not emitted in it), and it touches no pricing,
+no `KioskScene.changeSuspected` and no confirmation gate. The one earlier change that does
+reach it is R-32's contrast normalisation, which applies to the region runs it depends on —
+and that was already in place when it passed this morning.
+
+Its own documentation records the same sensitivity in the opposite direction: "Measured 30/30
+standalone and 29/30 in a full-suite run". With a floor of 0.95 over 30 trials, two lost
+targets fail it. So the candidates are a marginal randomised gate or a real regression, and
+**the evidence available does not separate them.** It is the project's motion-tolerance
+evidence, so this is not a failure to wave through: it needs one re-run with its log captured.
+
+#### Magnification: measured, and deliberately not acted on
+
+`OcrUpscaleCostTest` was added because the dominant OCR path — a full scan cropped to the
+screen — magnifies 2x because the image is a *crop*, not because its text was measured small,
+and that path costs p50 1202 ms / p90 2362 ms in the field.
+
+| framing | name height | 1x | 1.5x | 2x |
+|---|---|---|---|---|
+| screen fills 100 % | ~20 px | 791 ms, 4/4 names, 5/5 amounts | 754 ms, 4/4, 5/5 | 825 ms, 4/4, 5/5 |
+| 75 % | ~15 px | 550 ms, 4/4, 3/5 | 537 ms, 4/4, 3/5 | 446 ms, **3/4**, 4/5 |
+| 50 % | ~10 px | 340 ms, 4/4, 0/5 | 396 ms, 4/4, 0/5 | 396 ms, 4/4, 1/5 |
+
+Magnification is close to free here and buys nothing on names at any framing; at 75 % it read
+one fewer. The likely reason is that R-16 measured 2x **before** contrast normalisation
+existed, and normalisation now recovers the same text more cheaply.
+
+**Nothing was changed on the strength of this.** One fixture, one sample per cell, and the
+direction is mixed — amounts improve slightly at the two smaller framings while names get
+worse at one. Moving a threshold on that is how R-17 happened. The table is recorded so the
+next person has a starting point and a second fixture to beat.
+
+#### The re-anchor path, visible for the first time
+
+R-37 noted that 88 logged OCR runs contained no re-anchor run at all, because the `OCR in=`
+line sits after the anchor-run early return. With the new `ANCHOR` line and diagnostics
+enabled in the scenario test, one run produced 34 of them:
+
+```
+ANCHOR in=Region crop 16,671 268x62 (2% of frame) -> 536x124 @2.0x  17ms blocks=1  -> Anchored
+ANCHOR ...                                                            8ms blocks=0  -> NotSeen
+... 17 consecutive Anchored at 16-25 ms ...
+ANCHOR ...                                                          225ms blocks=24 -> NotSeen
+```
+
+Three things fall out of it. The cheap path works and costs **5-25 ms** against 78 ms for a
+full scan in the same harness and 1202 ms in the field. The scenario's hand-over-label steps
+show as `blocks=0`. And the screen transition shows as `blocks=24 -> NotSeen`: the crop was
+full of text, none of it the target.
+
+**Those last two are opposite situations that both reported `NotSeen`** and were
+indistinguishable in any capture. "I could not read anything" and "I read plenty and none of
+it was your button" call for different responses, and the second is strong evidence of a
+transition that the anchor path deliberately refuses to judge. That refusal is a documented
+decision and is left alone; what changed is that it is now observable, which is the
+precondition for revisiting it with evidence rather than opinion.
+
+The log line was verified by running it, not by compiling it: `LiveAssistScenarioTest` now
+enables `diagnosticsEnabled`, because a diagnostic nobody has seen produce output is a
+diagnostic that may not — `describeOcrInput` once crashed the pipeline thread with
+`IllegalFormatConversionException` and no test caught it.
+
+---
+
 ### ADR-009 — The voice model has no authority over kiosk state, and is never told it
 
 **Status.** Proposed. Supersedes nothing; extends ADR-006 to the audio channel.

@@ -44,12 +44,13 @@ import com.maranella.kioskvision.permission.openAppSettings
 import com.maranella.kioskvision.pipeline.AssistancePhase
 import com.maranella.kioskvision.speech.SpeechOutputStatus
 import com.maranella.kioskvision.speech.SpokenMessageText
+import com.maranella.kioskvision.speech.VoiceMode
 import com.maranella.kioskvision.ui.main.CameraStatus
-import com.maranella.kioskvision.ui.assist.VoiceMode
 import com.maranella.kioskvision.ui.main.LargeActionButton
 import com.maranella.kioskvision.ui.main.MainUiState
 import com.maranella.kioskvision.ui.main.PermissionExplanation
 import com.maranella.kioskvision.ui.main.PermissionStatus
+import com.maranella.kioskvision.voice.VoiceSessionState
 import com.maranella.kioskvision.ui.main.toCameraStatusCopy
 import com.maranella.kioskvision.ui.theme.HighContrastAccent
 import com.maranella.kioskvision.ui.theme.HighContrastOnSurface
@@ -169,6 +170,19 @@ private fun AssistPanel(
         // Deliberately not a live region: TalkBack speaking now would be heard by the microphone.
         Text(stringResource(R.string.status_listening), color = HighContrastAccent, fontSize = 24.sp, fontWeight = FontWeight.Bold)
     }
+    // The voice session's own state. Previously nothing in the UI read `state.voice` at all,
+    // so a session that failed or was reconnecting was invisible as well as inaudible.
+    // A live region here is safe: these fire when the assistant is *not* holding the
+    // microphone, so TalkBack reading them aloud cannot be captured as the user speaking.
+    when (state.voice.state) {
+        VoiceSessionState.Connecting ->
+            StatusLine(stringResource(R.string.status_voice_connecting))
+        VoiceSessionState.Reconnecting ->
+            StatusLine(stringResource(R.string.status_voice_reconnecting), announce = true)
+        VoiceSessionState.Error ->
+            StatusLine(stringResource(R.string.status_voice_unavailable), announce = true)
+        else -> Unit
+    }
     state.heardText?.let { StatusLine(stringResource(R.string.label_heard, it)) }
     state.session.targetLabel?.let { StatusLine(stringResource(R.string.label_target, it)) }
     when {
@@ -201,7 +215,11 @@ private fun AssistPanel(
     LargeActionButton(
         label = stringResource(
             when {
-                state.voiceMode == VoiceMode.LiveAssistant -> R.string.action_assistant_on
+                // Only while the stream is actually open. The mode outlives the session, and
+                // a label that says "microphone streaming" when nothing is listening is the
+                // same lie in the other direction.
+                state.listening && state.voiceMode == VoiceMode.LiveAssistant ->
+                    R.string.action_assistant_on
                 state.listening -> R.string.action_cancel_listening
                 else -> R.string.action_voice_command
             },
@@ -244,14 +262,25 @@ private fun Warnings(state: LiveAssistUiState) {
             SpeechOutputStatus.Unavailable -> add(R.string.warning_speech_output_unavailable)
             SpeechOutputStatus.Initializing, SpeechOutputStatus.Georgian -> Unit
         }
-        if (!state.recognitionAvailable) add(R.string.warning_recognition_unavailable)
+        // Deliberately not warning about on-device recognition any more: the app no longer
+        // uses it (see LiveAssistViewModel.recognizer), so the warning described a capability
+        // whose absence changes nothing for the user.
     }
     warnings.forEach { Text(stringResource(it), color = HighContrastAccent, fontSize = 18.sp) }
 }
 
 @Composable
-private fun StatusLine(text: String) {
-    Text(text, color = HighContrastOnSurface, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+private fun StatusLine(text: String, announce: Boolean = false) {
+    Text(
+        text = text,
+        color = HighContrastOnSurface,
+        fontSize = 22.sp,
+        fontWeight = FontWeight.SemiBold,
+        // Announced only where the line reports something the user must act on and the app is
+        // not speaking it: a reconnect, or the assistant being gone. Routine status must stay
+        // silent or TalkBack narrates the whole panel over the guidance.
+        modifier = if (announce) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier,
+    )
 }
 
 @Composable

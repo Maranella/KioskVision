@@ -8,15 +8,19 @@ import kotlin.math.max
  *
  * 1. **Buffer**: pixels of the `ImageProxy` as delivered by the sensor, not rotated.
  * 2. **Frame**: the `ImageProxy.cropRect` rotated upright by `imageInfo.rotationDegrees`
- *    (clockwise). Origin top-left, x right, y down, in pixels. OCR boxes, the fingertip, the
- *    target and all guidance geometry live here.
+ *    (clockwise). Origin top-left, x right, y down, in pixels. OCR boxes, the fingertip and
+ *    the detected screen quadrilateral live here.
  * 3. **View**: `PreviewView` pixels. Preview and ImageAnalysis are bound in one `UseCaseGroup`
  *    with the PreviewView's `ViewPort`, so the analysis crop shows the same field of view as
  *    the preview and frame → view is a uniform scale ([frameToView]). Only the developer
  *    overlay uses view coordinates; guidance never does.
+ * 4. **Screen**: the detected kiosk screen rectified to the unit square. **This is where
+ *    guidance runs.** It is not defined here — see `ScreenSpace`, which is the single place
+ *    frame and screen coordinates convert, via the homography `ScreenTracker` holds.
  *
- * The kiosk screen is approximated by the frame. That is only valid when the screen faces the
- * camera roughly head-on; no perspective (homography) correction is done yet.
+ * This file used to say the kiosk screen was approximated by the frame, valid only head-on.
+ * That stopped being true at R-21: the screen is detected and rectified, and guidance never
+ * falls back to frame coordinates — it refuses instead. This object now covers 1-3 only.
  */
 object FrameGeometry {
 

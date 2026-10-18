@@ -87,6 +87,38 @@ class ScreenTrackerTest {
         assertFalse("a restarted track is not stable", geometry.stable)
     }
 
+    /**
+     * The coffee-machine case, as a property rather than an anecdote.
+     *
+     * At a real machine the detector reported a screen on all 212 attempts and refused on none,
+     * at confidence 0.89-0.97, while the quadrilateral moved between unrelated parts of the
+     * frame every scan: the screen filled the view, so there was no dark housing to find and
+     * the detector segmented the screen's own bright content instead.
+     *
+     * `LiveAssistPipeline.screenScanRegion` now narrows the OCR scan only while the track is
+     * `stable`, and that defence is worth exactly as much as this property: a quadrilateral
+     * that never stops jumping must never report itself settled.
+     */
+    @Test
+    fun `a quadrilateral that keeps jumping never becomes stable`() {
+        val tracker = ScreenTracker()
+        // Offsets taken from the observed crop origins, which moved across most of the frame.
+        val offsets = listOf(0f, 600f, 150f, 700f, 0f, 520f, 90f, 640f)
+        offsets.forEachIndexed { index, offset ->
+            tracker.onDetection(candidate(quad(offsetX = offset)), nowMs = 1_000L + index * 220L)
+            val geometry = tracker.geometry(1_000L + index * 220L)
+            assertFalse(
+                "a track that restarts every detection must never claim to be settled " +
+                    "(detection $index at offset $offset)",
+                geometry?.stable == true,
+            )
+        }
+
+        // And it recovers: once the detections agree, the track settles as it always did.
+        repeat(3) { tracker.onDetection(candidate(quad(offsetX = 640f)), nowMs = 3_000L + it * 220L) }
+        assertTrue("a genuinely steady screen must still settle", tracker.geometry(3_500L)!!.stable)
+    }
+
     @Test
     fun `geometry goes stale when detection stops confirming it`() {
         val tracker = ScreenTracker()

@@ -88,4 +88,56 @@ class VoiceBoundaryTest {
             offendersIn(signature, "probe").isNotEmpty(),
         )
     }
+
+    @Test
+    fun `the actions the model may ask for carry no screen data in either direction`() {
+        // The widest surface between the app and the model, and the one that grew most
+        // recently: `compare_prices` answers a question *about amounts on the screen*, which
+        // is exactly the kind of feature that would otherwise be implemented by handing the
+        // model the amounts. It is not. The app compares locally and speaks the answer itself.
+        val offenders = AssistantActions::class.java.declaredMethods.flatMap { method ->
+            val signature = method.parameterTypes.joinToString { it.name } + " -> " + method.returnType.name
+            offendersIn(signature, "fun ${method.name}")
+        }
+
+        assertTrue(
+            "AssistantActions must not be able to carry kiosk screen data (ADR-009): $offenders",
+            offenders.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `every action answers with an outcome and nothing else`() {
+        // A method that returned anything but a ToolOutcome would be a channel back to the
+        // model: a label, a position, a price. The arguments are the user's own words, which
+        // is the one thing the model is allowed to put in.
+        val returns = AssistantActions::class.java.declaredMethods.map { it.returnType }
+        assertTrue(
+            "an action returns something other than ToolOutcome: " + returns.map { it.name },
+            returns.all { it == ToolOutcome::class.java },
+        )
+        val arguments = AssistantActions::class.java.declaredMethods
+            .flatMap { it.parameterTypes.toList() }
+            .toSet()
+        assertTrue(
+            "an action takes something other than text: " + arguments.map { it.name },
+            arguments.all { it == String::class.java },
+        )
+    }
+
+    @Test
+    fun `an outcome is a bare word, with no room for detail`() {
+        // ToolOutcome is what goes on the wire. An instance field on it — a label, an amount,
+        // a count — would travel with it, so there are none, and `wireValue` is derived from
+        // the constant's own name.
+        val instanceFields = ToolOutcome::class.java.declaredFields
+            .filterNot { java.lang.reflect.Modifier.isStatic(it.modifiers) }
+        assertTrue(
+            "ToolOutcome must stay a closed set of bare words: " + instanceFields.map { it.name },
+            instanceFields.isEmpty(),
+        )
+        for (outcome in ToolOutcome.entries) {
+            assertTrue("'${outcome.wireValue}' is not a bare word", outcome.wireValue.all { it.isLetter() })
+        }
+    }
 }

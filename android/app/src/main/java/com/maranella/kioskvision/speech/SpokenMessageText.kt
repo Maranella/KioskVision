@@ -3,6 +3,7 @@ package com.maranella.kioskvision.speech
 import android.content.res.Resources
 import com.maranella.kioskvision.R
 import com.maranella.kioskvision.assist.GuidanceDirection
+import com.maranella.kioskvision.assist.Money
 import com.maranella.kioskvision.assist.RecognitionFailure
 import com.maranella.kioskvision.assist.SpokenMessage
 
@@ -29,6 +30,19 @@ object SpokenMessageText {
                 append(resources.getString(R.string.speak_screen_some_unreadable))
             }
         }
+        is SpokenMessage.OptionPrice -> resources.getString(
+            R.string.speak_option_price,
+            message.label,
+            money(resources, message.price),
+        )
+        is SpokenMessage.CheaperOption -> resources.getString(
+            R.string.speak_cheaper_option,
+            message.cheaper,
+            money(resources, message.cheaperPrice),
+            message.other,
+            money(resources, message.otherPrice),
+        )
+        SpokenMessage.PriceNotReadable -> resources.getString(R.string.speak_price_not_readable)
         SpokenMessage.NoTextVisible -> resources.getString(R.string.speak_no_text_visible)
         SpokenMessage.TextRecognitionNotReady -> resources.getString(R.string.speak_ocr_not_ready)
         SpokenMessage.ScreenChanged -> resources.getString(R.string.speak_screen_changed)
@@ -47,7 +61,22 @@ object SpokenMessageText {
         SpokenMessage.HoldStill -> resources.getString(R.string.speak_hold_still)
         SpokenMessage.GuidanceStopped -> resources.getString(R.string.speak_guidance_stopped)
         SpokenMessage.NotUnderstood -> resources.getString(R.string.speak_not_understood)
+        SpokenMessage.VoiceAssistantUnavailable ->
+            resources.getString(R.string.speak_assistant_unavailable)
         is SpokenMessage.RecognitionFailed -> resources.getString(failureText(message.reason))
+    }
+
+    /**
+     * An amount in words.
+     *
+     * "3.50" handed to a Georgian voice is read as a decimal number, not as money, and a
+     * blind user has no way to tell which the app meant. Saying „3 ლარი და 50 თეთრი" is
+     * unambiguous out loud, which is the only form that matters here.
+     */
+    private fun money(resources: Resources, value: Money): String = when {
+        value.lari == 0 -> resources.getString(R.string.speak_money_tetri, value.remainderTetri)
+        value.remainderTetri == 0 -> resources.getString(R.string.speak_money_lari, value.lari)
+        else -> resources.getString(R.string.speak_money_lari_tetri, value.lari, value.remainderTetri)
     }
 
     fun directionText(direction: GuidanceDirection): Int = when (direction) {

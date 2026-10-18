@@ -100,8 +100,27 @@ data class KioskScene(
     /** Milliseconds since the screen geometry was last confirmed by a detection. */
     val geometryAgeMs: Long,
     val observedAtMs: Long,
+    /**
+     * The app has evidence that the kiosk has moved on, but has not confirmed it yet.
+     *
+     * [observedAtMs] ages the *geometry*, which is re-detected several times a second; the
+     * text comes from OCR, which is far slower. So a scene can look fresh while listing labels
+     * from the screen before this one, and that is exactly the window in which confirming an
+     * offer would guide a finger to a button that is no longer there. This is the one signal
+     * the app has during that window, and it comes from the screen-change comparison rather
+     * than from a timer.
+     */
+    val changeSuspected: Boolean = false,
 ) {
     val hasScreen: Boolean get() = readability != SceneReadability.NoScreen
+
+    /**
+     * Options on this screen with an amount that can honestly be attributed to them.
+     *
+     * Computed once per scene and empty far more often than not — see [OptionPricing] for the
+     * rules and for why refusing is the common case.
+     */
+    val pricedOptions: List<PricedOption> by lazy { OptionPricing.pair(elements) }
 
     /** True when element bounds are genuinely screen-relative and safe to guide from. */
     val hasUsableGeometry: Boolean
@@ -110,6 +129,26 @@ data class KioskScene(
     fun age(nowMs: Long): Long = nowMs - observedAtMs
 
     fun isStale(nowMs: Long, limitMs: Long = STALE_LIMIT_MS): Boolean = age(nowMs) > limitMs
+
+    /**
+     * Whether a statement about this scene would be a statement about the screen the user is
+     * standing in front of **now**.
+     *
+     * Two ways it would not be, and they need different words to the user but the same
+     * refusal from the app:
+     *
+     * - the scene is too old to act on at all ([isStale]);
+     * - the app has evidence the kiosk has moved on but has not confirmed it yet
+     *   ([changeSuspected]). This is the case a timestamp cannot catch, because
+     *   [observedAtMs] ages the geometry — re-detected several times a second — while the
+     *   labels come from OCR, which is far slower. A scene can look fresh and list the
+     *   previous screen's text.
+     *
+     * Everything that speaks about the screen as present fact must ask this first: an offer,
+     * a price, a confirmation. A blind user cannot check any of the three.
+     */
+    fun describesScreenNow(nowMs: Long, limitMs: Long = STALE_LIMIT_MS): Boolean =
+        !changeSuspected && !isStale(nowMs, limitMs)
 
     /**
      * The element most likely to be the screen's title: the topmost trustworthy label that is
@@ -152,6 +191,7 @@ data class KioskScene(
             frameWidth: Int,
             frameHeight: Int,
             nowMs: Long,
+            changeSuspected: Boolean = false,
         ): KioskScene {
             val elements = labels.mapNotNull { label ->
                 val screenRelative = screen?.let { ScreenSpace.toScreen(it, label.block.boundingBox) }
@@ -182,6 +222,7 @@ data class KioskScene(
                 screenStable = screen?.stable ?: false,
                 geometryAgeMs = screen?.ageMs ?: 0L,
                 observedAtMs = nowMs,
+                changeSuspected = changeSuspected,
             )
         }
 

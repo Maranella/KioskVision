@@ -98,6 +98,13 @@ data class ObservedLabel(
     val timesSeen: Int,
     /** Best confidence across those runs. */
     val bestConfidence: Float,
+    /**
+     * How many runs ago this label was last read. 0 means the most recent run saw it.
+     *
+     * Explicit because a label that the newest scan missed is still usable — one poor frame is
+     * not evidence a button has gone — but the caller has to be able to tell the difference.
+     */
+    val runsAgo: Int = 0,
 )
 
 sealed interface OcrUpdate {
@@ -227,9 +234,7 @@ class TargetTracker {
         // aloud needs ScreenReader's — so the intake filter only has to exclude pure noise. A
         // higher floor here would discard the blurred-but-correct readings that corroboration
         // exists to rescue (R-12), before they ever reach it.
-        val current = blocks.filter {
-            it.confidence >= MIN_RETAINED_CONFIDENCE && TextNormalizer.letterCount(it.text) >= 2
-        }
+        val current = blocks.filter(::isRetainable)
         val previous = snapshot
 
         // A run that read almost nothing is evidence of a bad frame, not of a changed screen.
@@ -326,12 +331,9 @@ class TargetTracker {
         // Same reasoning as the intake filter: under blur the label is read correctly at a
         // poor score, and what re-anchoring needs from it is its position. Identity is guarded
         // by the text similarity below, and a position far from the last one resets confidence.
-        val usable = blocks.filter {
-            it.confidence >= MIN_RETAINED_CONFIDENCE && TextNormalizer.letterCount(it.text) >= 2
-        }
-        val tolerance = max(0.6f * target.box.height, POSITION_TOLERANCE_OF_DIAGONAL * frame.diagonal)
+        val usable = blocks.filter(::isRetainable)
         val seen = usable
-            .filter { TextNormalizer.lineSimilarity(it.normalizedText, target.normalizedLabel) >= SAME_LINE_SIMILARITY }
+            .filter { namesTarget(it.normalizedText, target.normalizedLabel) }
             .minByOrNull { it.boundingBox.centerDistanceTo(target.box) }
 
         if (seen == null) {
@@ -341,7 +343,7 @@ class TargetTracker {
             return AnchorUpdate.NotSeen
         }
 
-        val consistent = seen.boundingBox.centerDistanceTo(target.box) <= tolerance
+        val consistent = movedPlausibly(seen.boundingBox, target.box, frame)
         this.target = target.copy(
             box = seen.boundingBox,
             normalizedBox = seen.boundingBox.normalizedIn(frame),
@@ -353,6 +355,65 @@ class TargetTracker {
             anchoredAtMs = nowMs,
         )
         return AnchorUpdate.Anchored
+    }
+
+    /**
+     * Whether a re-anchored box is near enough to be the same label, judged per axis.
+     *
+     * A single radius cannot express what "near enough" means here, because the two axes carry
+     * different information. **Across** a label, a match may legitimately land half a label
+     * away: when only one half of „ამერიკანო / Americano" is read, that half's bounding-box
+     * centre sits beside the whole phrase's centre by construction — measured on the device as
+     * 180 and 210 against a combined centre of 197, while the radius was 21 px. Every such
+     * refresh was scored inconsistent, `confirmations` fell back to 1, guidance was withdrawn
+     * as `Unconfirmed` roughly twice a second, and each withdrawal reset the on-target dwell —
+     * which is why arrival was never announced even with the finger on the button.
+     *
+     * **Down** the screen nothing of the sort happens: the parts of a label share a baseline,
+     * and the measured vertical jitter over the same run was at most 11 px. So the vertical
+     * bound stays tight, and it is the one that matters for safety — a different control is on
+     * a different row, and that is exactly what must never be mistaken for this one.
+     */
+    private fun movedPlausibly(found: TextBox, held: TextBox, frame: FrameSize): Boolean {
+        val floor = POSITION_TOLERANCE_OF_DIAGONAL * frame.diagonal
+        val acrossLimit = max(0.5f * held.width, floor)
+        val downLimit = max(0.6f * held.height, floor)
+        return abs(found.centerX - held.centerX) <= acrossLimit &&
+            abs(found.centerY - held.centerY) <= downLimit
+    }
+
+    /**
+     * Whether [text] names [label], allowing **one part of a multi-part label**.
+     *
+     * A bilingual caption is one phrase to the eye and often two to OCR. The full-frame pass
+     * sees „კაპუჩინო / Cappuccino" on one baseline and groups it into a single label; a tight
+     * re-anchor crop re-runs layout analysis on a fraction of the image and routinely returns
+     * only one half. `lineSimilarity` takes the **minimum** of both directions, so a half
+     * scores against the whole like this (measured, threshold 0.75):
+     *
+     * | read in the region | similarity |
+     * |---|---|
+     * | `კაპუჩინო` | **0.500** |
+     * | `Cappuccino` | **0.500** |
+     *
+     * Both were refused, and that is why re-anchoring failed on **48 of 51 attempts** at a real
+     * coffee machine. The anchor then aged past `MAX_ANCHOR_AGE_MS`, guidance was withdrawn as
+     * `GeometryStale`, `DirectionalGuidanceEngine.reset()` cleared the on-target dwell, and
+     * `ON_TARGET` could never be reached — the user was standing on the right button and being
+     * told the position was uncertain, 68 % of the time.
+     *
+     * Only parts of at least [MIN_DISTINCTIVE_PART] characters may stand in for the whole. That
+     * bound is what keeps this safe on the very screen that motivated it: four of its cards
+     * contain „ლატე" (4 characters), so a shorter bound would let one drink re-anchor onto
+     * another. Identity is still guarded twice over — the crop is only the target's own box
+     * plus half its size, and a match found away from the stored position resets confirmations
+     * and withdraws guidance until it is earned again.
+     */
+    private fun namesTarget(text: String, label: String): Boolean {
+        if (TextNormalizer.lineSimilarity(text, label) >= SAME_LINE_SIMILARITY) return true
+        return label.split(' ')
+            .filter { it.length >= MIN_DISTINCTIVE_PART }
+            .any { TextNormalizer.lineSimilarity(text, it) >= SAME_LINE_SIMILARITY }
     }
 
     /**
@@ -385,27 +446,73 @@ class TargetTracker {
      */
     val corroborated: List<ObservedLabel>
         get() {
-            val (latest, frame) = recentRuns.lastOrNull() ?: return emptyList()
-            val older = recentRuns.dropLast(1)
+            val runs = recentRuns.toList()
+            if (runs.isEmpty()) return emptyList()
+            val frame = runs.last().second
             val tolerance = CORROBORATION_DISTANCE_OF_DIAGONAL * frame.diagonal
-            return latest.map { block ->
-                var seen = 1
-                var best = block.confidence
-                for ((run, _) in older) {
-                    val agreeing = run.firstOrNull {
+
+            // One poor scan must not hide the screen.
+            //
+            // This was built from the **latest run only**, so a label the newest scan happened
+            // to miss became invisible to matching even when the two runs before it had read it
+            // clearly. On a hand-held phone that happens constantly — the device logs show the
+            // line count going 44 -> 15 -> 5 -> 2 between consecutive scans — and each dip made
+            // the app answer a perfectly valid request with "that is not on this screen".
+            //
+            // The union of the retained runs is the honest view of what this screen shows. It
+            // needs no cache timeout: [recentRuns] already holds at most
+            // [CORROBORATION_RUNS] runs, and it is **cleared outright** on a confirmed screen
+            // transition, so nothing can survive into a screen that does not show it.
+            val merged = mutableListOf<Merged>()
+            runs.forEachIndexed { index, (blocks, _) ->
+                val runsAgo = runs.size - 1 - index
+                for (block in blocks) {
+                    val existing = merged.firstOrNull {
                         // Stricter than the similarity used for tracking: corroboration is a
                         // licence to trust a low score, so near-identical text is required.
-                        TextNormalizer.lineSimilarity(it.normalizedText, block.normalizedText) >= CORROBORATION_SIMILARITY &&
-                            it.boundingBox.centerDistanceTo(block.boundingBox) <= tolerance
+                        TextNormalizer.lineSimilarity(it.block.normalizedText, block.normalizedText) >=
+                            CORROBORATION_SIMILARITY &&
+                            it.block.boundingBox.centerDistanceTo(block.boundingBox) <= tolerance
                     }
-                    if (agreeing != null) {
-                        seen++
-                        best = max(best, agreeing.confidence)
+                    if (existing == null) {
+                        merged += Merged(block, seen = 1, best = block.confidence, runsAgo = runsAgo)
+                    } else {
+                        existing.seen++
+                        existing.best = max(existing.best, block.confidence)
+                        // The freshest reading owns the position guidance will aim at.
+                        if (runsAgo <= existing.runsAgo) {
+                            existing.block = block
+                            existing.runsAgo = runsAgo
+                        }
                     }
                 }
-                ObservedLabel(block, timesSeen = seen, bestConfidence = best)
             }
+            // A carried-forward label is only a stand-in for one the newest run missed. If the
+            // newest run *did* read that text — somewhere else, because the phone moved — the
+            // older copy is the same button at a stale position, and keeping both would offer
+            // the user the same control twice and invite a spurious "which one did you mean?".
+            val fresh = merged.filter { it.runsAgo == 0 }
+            return merged
+                .filter { candidate ->
+                    candidate.runsAgo == 0 || fresh.none {
+                        TextNormalizer.lineSimilarity(
+                            it.block.normalizedText,
+                            candidate.block.normalizedText,
+                        ) >= CORROBORATION_SIMILARITY
+                    }
+                }
+                .map {
+                    ObservedLabel(it.block, timesSeen = it.seen, bestConfidence = it.best, runsAgo = it.runsAgo)
+                }
         }
+
+    /** Mutable accumulator while merging runs; never escapes [corroborated]. */
+    private class Merged(
+        var block: DetectedTextBlock,
+        var seen: Int,
+        var best: Float,
+        var runsAgo: Int,
+    )
 
     private fun updateTarget(
         current: List<DetectedTextBlock>,
@@ -421,13 +528,19 @@ class TargetTracker {
         // the new position has to earn its confirmations again.
         val cameraMoved = shift != null && hypot(shift.first, shift.second) > tolerance
 
+        // The same two rules the re-anchor path uses. They were fixed there first, from device
+        // evidence, and left here — so a full-frame run that read one half of a bilingual label
+        // still failed to recognise its own target, and a half's bounding box still counted as
+        // having moved too far. Both paths must agree about what "the same label" means and how
+        // far it may travel, or the target's confidence oscillates depending on which kind of
+        // run happened to come back last.
         val seen = current
-            .filter { TextNormalizer.lineSimilarity(it.normalizedText, target.normalizedLabel) >= SAME_LINE_SIMILARITY }
+            .filter { namesTarget(it.normalizedText, target.normalizedLabel) }
             .minByOrNull { it.boundingBox.centerDistanceTo(predicted) }
 
         this.target = when {
             seen != null -> {
-                val consistent = seen.boundingBox.centerDistanceTo(predicted) <= tolerance
+                val consistent = movedPlausibly(seen.boundingBox, predicted, frame)
                 target.copy(
                     box = seen.boundingBox,
                     normalizedBox = seen.boundingBox.normalizedIn(frame),
@@ -542,6 +655,71 @@ class TargetTracker {
 
         private const val CHANGE_CONFIRMATION_RUNS = 2
         private const val SAME_LINE_SIMILARITY = 0.75f
+
+        /**
+         * Shortest part of a label that may identify it on its own.
+         *
+         * Five, because the screen this was found on carries „ლატე მაკიატო",
+         * „კარამელის ლატე", „კარამელის ლატე XL" and „შოკოლადის ლატე": the word „ლატე" is four
+         * characters and appears on four different buttons, so four would let any of them
+         * re-anchor onto any other.
+         */
+        private const val MIN_DISTINCTIVE_PART = 5
+        /**
+         * Whether an OCR block survives intake at all.
+         *
+         * Extracted so the developer overlay can report *why* a block was discarded using the
+         * same rule that discards it, rather than a copy that can drift. Both intake sites
+         * call this; nothing else may reimplement it.
+         *
+         * Note what the letter rule means for a screen made mostly of numbers: `letterCount`
+         * counts letters, not digits, so `250`, `1` and `80°` are all dropped. That is correct
+         * for a payment terminal, whose controls are words. It is an open question for a
+         * machine whose controls are numerals.
+         */
+        fun isRetainable(block: DetectedTextBlock): Boolean =
+            block.confidence >= MIN_RETAINED_CONFIDENCE &&
+                (TextNormalizer.letterCount(block.text) >= 2 || isNumericLabel(block.text))
+
+        /**
+         * A price, amount or quantity: the other half of what a machine screen says.
+         *
+         * Measured at a coffee machine (SM-S731B): one scan returned `raw=48 kept=12
+         * droppedShort=32`. **Two thirds of the screen was discarded for having fewer than two
+         * letters** — every price (`1.50`, `2.00`, `2.50`, `3.00`), every size (`XL`), every
+         * `INFO`. The letter rule was written for a payment terminal, whose controls are words;
+         * it silently deleted the half of a machine screen that carries the numbers.
+         *
+         * Reading an amount is not a nicety here. `SAFETY_AND_PRIVACY.md` requires the app to
+         * refuse a critical transaction when the relevant details cannot be read, so a price
+         * that never reaches the tracker is a safety problem, not only a usability one.
+         *
+         * Deliberately narrow, because OCR noise looks more like digits than like words. It
+         * requires **at least two digits** and admits nothing but digits and the marks that
+         * genuinely appear around a number, so `1.50`, `2,50 ₾`, `80°`, `82%` and `12.10.2026`
+         * are kept while `3`, `I`, `|`, `.` and `---` are not. A single digit stays out: the
+         * stepper values are worth less than the false targets that admitting them would cost.
+         */
+        fun isNumericLabel(text: String): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.count { it.isDigit() } < MIN_LABEL_DIGITS) return false
+            return trimmed.all { it.isDigit() || it in NUMERIC_MARKS }
+        }
+
+        /** Why [isRetainable] turned a block down, or null when it did not. */
+        fun rejectionFor(block: DetectedTextBlock): String? = when {
+            block.confidence < MIN_RETAINED_CONFIDENCE ->
+                "confidence %.2f < %.2f".format(block.confidence, MIN_RETAINED_CONFIDENCE)
+            isRetainable(block) -> null
+            else -> "only ${TextNormalizer.letterCount(block.text)} letter(s), not a number either"
+        }
+
+        /** Enough digits to be a figure rather than a stray mark. */
+        private const val MIN_LABEL_DIGITS = 2
+
+        /** What may appear around digits in a price, a size or a date. */
+        private val NUMERIC_MARKS = setOf('.', ',', ' ', '₾', '%', '°')
+
         /** Floor for keeping an OCR line at all; below this it is treated as noise. */
         const val MIN_RETAINED_CONFIDENCE = 0.15f
 

@@ -1,187 +1,161 @@
 package com.maranella.kioskvision.speech
 
+import com.maranella.kioskvision.assist.GuidanceAnnouncer
 import com.maranella.kioskvision.assist.GuidanceDirection
 import com.maranella.kioskvision.assist.ScreenReading
 import com.maranella.kioskvision.assist.SpokenMessage
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * For a blind user the audio channel is the whole interface, so which voice wins is a product
  * decision and not a detail.
+ *
+ * These tests were rewritten when the model-speaking arbitration was removed. The previous
+ * suite drove `onModelChunk`, which **no production code ever called**: `isModelSpeaking` was
+ * permanently false, so twelve passing tests described a policy that never ran. They are
+ * replaced by tests of the policy that does.
  */
 class AudioOutputCoordinatorTest {
 
     private val direction = SpokenMessage.Direction(GuidanceDirection.LEFT)
     private val reading = SpokenMessage.ScreenContents(ScreenReading(emptyList(), omittedUncertain = false))
 
+    // --- Guidance ---------------------------------------------------------------------------
+
     @Test
-    fun `with the assistant silent, anything may be spoken`() {
+    fun `guidance is spoken, never held back`() {
         val coordinator = AudioOutputCoordinator()
         assertEquals(SpeechDecision.SpeakNow, coordinator.decide(direction, 1_000L))
         assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 1_000L))
     }
 
     @Test
-    fun `a direction cuts the assistant off`() {
+    fun `the same explanation is not repeated within a few seconds`() {
         val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        assertEquals(SpeechDecision.PreemptModel, coordinator.decide(direction, 1_000L))
-    }
-
-    @Test
-    fun `withdrawing guidance also cuts the assistant off`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        // Letting conversation cover these leaves the user reaching for a position the app no
-        // longer stands behind.
-        assertEquals(SpeechDecision.PreemptModel, coordinator.decide(SpokenMessage.TargetPositionLost, 1_000L))
-        assertEquals(SpeechDecision.PreemptModel, coordinator.decide(SpokenMessage.ScreenNotTracked, 1_000L))
-        assertEquals(SpeechDecision.PreemptModel, coordinator.decide(SpokenMessage.GuidanceStopped, 1_000L))
-    }
-
-    @Test
-    fun `descriptions are dropped rather than queued behind the assistant`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        // Queuing would deliver the screen reading after the assistant finishes, by which time
-        // the user has asked something else. They can ask again; a late answer confuses.
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 1_000L))
-        assertEquals(SpeechDecision.Drop, coordinator.decide(SpokenMessage.NotUnderstood, 1_000L))
-    }
-
-    @Test
-    fun `the assistant is still speaking between transcript chunks`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-
-        // Chunks arrive with gaps, and the user's own transcript interleaves with them. The
-        // first version of this cleared the flag on anything that was not a model chunk, so
-        // the app concluded the assistant had finished mid-sentence and talked over it —
-        // which is what a listener hears as two voices at once.
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 1_400L))
-        coordinator.onModelChunk(1_500L)
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 2_900L))
-    }
-
-    @Test
-    fun `playback is assumed to outlast the last chunk`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-
-        // The SDK keeps rendering audio after the final transcript chunk, so the hold has to
-        // extend past it.
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 2_500L))
-        // ...but not forever, or guidance would stay silent while the finger is moving.
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 5_000L))
-    }
-
-    @Test
-    fun `the assistant falling silent restores normal speech`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 1_000L))
-
-        coordinator.onModelSilent()
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 1_000L))
-    }
-
-    // --- one voice at a time -----------------------------------------------------------------
-
-    @Test
-    fun `an identical message is not repeated back to back`() {
-        val coordinator = AudioOutputCoordinator()
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 1_000L))
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 2_000L))
-        // Once the suppression window passes it may be said again.
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 9_000L))
+        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(SpokenMessage.NotUnderstood, 1_000L))
+        assertEquals(SpeechDecision.Drop, coordinator.decide(SpokenMessage.NotUnderstood, 2_000L))
+        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(SpokenMessage.NotUnderstood, 6_000L))
     }
 
     @Test
     fun `directions are exempt from repeat suppression`() {
         val coordinator = AudioOutputCoordinator()
-        // Repetition is how a finger gets steered; suppressing it would strand the user
-        // mid-reach with no feedback.
+        // Repetition is how a finger gets steered; GuidanceAnnouncer owns their cadence.
         assertEquals(SpeechDecision.SpeakNow, coordinator.decide(direction, 1_000L))
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(direction, 1_200L))
+        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(direction, 1_100L))
     }
 
     @Test
-    fun `a change of target makes the same sentence sayable again`() {
+    fun `an explicit repeat is always honoured`() {
         val coordinator = AudioOutputCoordinator()
         coordinator.decide(reading, 1_000L)
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 1_500L))
+        // The user asking again means they did not hear it the first time.
+        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 1_100L, userRequested = true))
+    }
 
+    @Test
+    fun `a new target clears the repeat suppression`() {
+        val coordinator = AudioOutputCoordinator()
+        coordinator.decide(SpokenMessage.CannotReadText, 1_000L)
         coordinator.onContextChanged()
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 1_600L))
+        // The same sentence means something different once the thing it refers to has moved on.
+        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(SpokenMessage.CannotReadText, 1_100L))
     }
 
     @Test
-    fun `an explicit repeat is honoured even while the assistant is speaking`() {
+    fun `losing the assistant is announced rather than left silent`() {
         val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-
-        // Pressing Repeat means the user did not hear it. Dropping it, or waiting for the
-        // assistant, answers a direct request with silence.
+        // Otherwise undetectable: the microphone simply stops being streamed.
         assertEquals(
-            SpeechDecision.PreemptModel,
-            coordinator.decide(reading, 1_200L, userRequested = true),
+            SpeechDecision.SpeakNow,
+            coordinator.decide(SpokenMessage.VoiceAssistantUnavailable, 1_000L),
         )
     }
 
+    // --- Assistant replies ------------------------------------------------------------------
+
+    private fun reply(
+        nowMs: Long,
+        offeredAtMs: Long = 0L,
+        appSpeaking: Boolean = false,
+        lastGuidanceSpokenAtMs: Long = Long.MIN_VALUE / 2,
+        appOwnsVoiceUntilMs: Long = Long.MIN_VALUE / 2,
+    ) = AudioOutputCoordinator().decideAssistantReply(
+        offeredAtMs = offeredAtMs,
+        nowMs = nowMs,
+        appSpeaking = appSpeaking,
+        lastGuidanceSpokenAtMs = lastGuidanceSpokenAtMs,
+        appOwnsVoiceUntilMs = appOwnsVoiceUntilMs,
+    )
+
     @Test
-    fun `an explicit repeat is never suppressed as a duplicate`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.decide(reading, 1_000L)
-        assertEquals(
-            SpeechDecision.PreemptModel,
-            coordinator.decide(reading, 1_100L, userRequested = true),
-        )
+    fun `a reply is spoken when nothing else is using the channel`() {
+        assertEquals(ReplyDecision.SpeakNow, reply(nowMs = 0L))
     }
 
     @Test
-    fun `a dropped message does not count as having been said`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        // Dropped because the assistant is talking...
-        assertEquals(SpeechDecision.Drop, coordinator.decide(reading, 1_100L))
-        // ...so once it stops, the message is still new and must be spoken rather than
-        // suppressed as a repeat of something the user never heard.
-        assertEquals(SpeechDecision.SpeakNow, coordinator.decide(reading, 4_000L))
+    fun `a reply waits while the app is making sound`() {
+        assertEquals(ReplyDecision.Wait, reply(nowMs = 100L, appSpeaking = true))
     }
 
     @Test
-    fun `every spoken message is classified, so a new one cannot default to urgent`() {
-        val coordinator = AudioOutputCoordinator()
-        coordinator.onModelChunk(1_000L)
-        // The when over SpokenMessage is exhaustive by compilation; this exercises a
-        // representative message of each kind so the classification is covered rather than
-        // merely compiled.
-        val messages = listOf(
-            direction,
-            SpokenMessage.TargetSelected("გადახდა", isCritical = true),
-            SpokenMessage.TargetNotFound("ბილეთი"),
-            SpokenMessage.TargetAmbiguous("გადახდა", "გადახდის ისტორია"),
-            reading,
-            SpokenMessage.NoTextVisible,
-            SpokenMessage.TextRecognitionNotReady,
-            SpokenMessage.ScreenChanged,
-            SpokenMessage.ScreenOutOfFocus,
-            SpokenMessage.CannotReadText,
-            SpokenMessage.TargetPositionLost,
-            SpokenMessage.ScreenNotTracked,
-            SpokenMessage.ReadingScreen,
-            SpokenMessage.HoldStill,
-            SpokenMessage.GuidanceStopped,
-            SpokenMessage.NotUnderstood,
+    fun `a reply waits while the app is speaking the substance itself`() {
+        // read_screen takes seconds; an acknowledgement on top cuts off the very reading it
+        // announces, which is what the user actually asked for.
+        assertEquals(ReplyDecision.Wait, reply(nowMs = 100L, appOwnsVoiceUntilMs = 20_000L))
+    }
+
+    @Test
+    fun `a reply waits briefly after a direction, then goes`() {
+        assertEquals(ReplyDecision.Wait, reply(nowMs = 1_000L, lastGuidanceSpokenAtMs = 500L))
+        assertEquals(ReplyDecision.SpeakNow, reply(nowMs = 1_400L, lastGuidanceSpokenAtMs = 500L))
+    }
+
+    @Test
+    fun `a reply that waited past its deadline is reported, not dropped in silence`() {
+        assertEquals(ReplyDecision.TooLate, reply(offeredAtMs = 0L, nowMs = 10_000L, appSpeaking = true))
+    }
+
+    /**
+     * The defect this policy exists to fix, as arithmetic.
+     *
+     * The old rule suppressed a reply for a flat 3 s after any spoken direction, while
+     * `GuidanceAnnouncer` repeats the same direction every 2.5 s. 3000 > 2500, so while the app
+     * was guiding the window never opened and **every** reply was discarded without a word.
+     */
+    @Test
+    fun `a reply gets the channel during a run of directions, which the old rule never allowed`() {
+        val cadenceMs = 2_500L // GuidanceAnnouncer.cooldownMs for a directional cue
+        val oldHoldMs = 3_000L // the DIRECTION_HOLDS_VOICE_MS that was removed
+        assertTrue(
+            "the old hold must outlast the cadence, or there was no bug to fix",
+            oldHoldMs > cadenceMs,
         )
-        messages.forEach { message ->
-            val decision = coordinator.decide(message, 1_000L)
-            assertEquals(
-                "every message must resolve to preempt or drop while the model speaks: $message",
-                true,
-                decision == SpeechDecision.PreemptModel || decision == SpeechDecision.Drop,
-            )
+
+        val spokenAt = generateSequence(0L) { it + cadenceMs }.take(4).toList()
+        val windowUnderOldRule = (0L..7_500L step 100L).firstOrNull { now ->
+            now - spokenAt.last { it <= now } >= oldHoldMs
         }
+        assertEquals("the old rule left no window at all", null, windowUnderOldRule)
+
+        val windowNow = (0L..7_500L step 100L).firstOrNull { now ->
+            reply(nowMs = now, offeredAtMs = now, lastGuidanceSpokenAtMs = spokenAt.last { it <= now }) ==
+                ReplyDecision.SpeakNow
+        }
+        assertNotNull("a reply must get the channel at some point during continuous guidance", windowNow)
+    }
+
+    @Test
+    fun `the settle leaves a window wider than the announcer's own minimum gap`() {
+        // Guards the anchor: the settle is justified as being at least MIN_GAP_MS, the spacing
+        // the app already requires between two of its own cues. If that constant moved above
+        // the settle, this should fail rather than the behaviour quietly degrading on a device.
+        assertEquals(
+            ReplyDecision.SpeakNow,
+            reply(nowMs = GuidanceAnnouncer.MIN_GAP_MS + 200L, lastGuidanceSpokenAtMs = 0L),
+        )
     }
 }

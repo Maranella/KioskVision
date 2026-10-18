@@ -50,10 +50,44 @@ enum class ToolOutcome {
     Stopped,
 
     /** The screen is being read aloud. */
-    Reading;
+    Reading,
+
+    /**
+     * The app is saying the amounts out loud itself, from what the camera read.
+     *
+     * The model is told that and nothing more: not the prices, not which option won. It asked
+     * a question about the screen it cannot see, and the device answered the user directly.
+     */
+    Comparing,
+
+    /**
+     * Amounts could not be attached to options reliably enough to speak.
+     *
+     * Distinct from [NotOnScreen]: the option may well be there, and so may a price — what is
+     * missing is confidence that the two belong together.
+     */
+    PriceUnknown;
 
     /** The single field sent back to the model. */
     val wireValue: String get() = name.lowercase()
+}
+
+/**
+ * Why a request could not be turned into a target, as the model is told it.
+ *
+ * One mapping, used by every path that resolves an intent, so "it is not on this screen" and
+ * "I could not read the screen" cannot come to mean different things depending on which
+ * function the model happened to call.
+ */
+fun com.maranella.kioskvision.assist.ResolutionFailure.asOutcome(): ToolOutcome = when (this) {
+    com.maranella.kioskvision.assist.ResolutionFailure.NoScreen -> ToolOutcome.NoScreen
+    // The screen is in view but was not rectified, so nothing on it can be pointed at. The
+    // user has to re-frame the kiosk, which is the same thing they must do with no screen.
+    com.maranella.kioskvision.assist.ResolutionFailure.GeometryUnusable -> ToolOutcome.NoScreen
+    com.maranella.kioskvision.assist.ResolutionFailure.SceneUnreadable -> ToolOutcome.ScreenNotReadable
+    com.maranella.kioskvision.assist.ResolutionFailure.SceneStale -> ToolOutcome.ScreenNotReadable
+    com.maranella.kioskvision.assist.ResolutionFailure.NoSimilarLabel -> ToolOutcome.NotOnScreen
+    com.maranella.kioskvision.assist.ResolutionFailure.UnconfirmedLabel -> ToolOutcome.Unconfirmed
 }
 
 /**
@@ -73,6 +107,16 @@ interface AssistantActions {
      * model understood it — not a label the model read from anywhere.
      */
     fun selectTarget(query: String): ToolOutcome
+
+    /**
+     * The user asked what something costs, or which of two things is cheaper.
+     *
+     * [first] and [second] are the user's own words for the options, as the model understood
+     * them — never labels the model read, because it has read nothing. With neither, the app
+     * answers about the cheapest option it can see. The comparison itself happens on the
+     * device, against amounts OCR actually produced, and the answer is spoken locally.
+     */
+    fun comparePrices(first: String?, second: String?): ToolOutcome
 
     fun stopGuidance(): ToolOutcome
 
@@ -98,8 +142,10 @@ object AssistantTools {
     const val READ_SCREEN = "read_screen"
     const val CONFIRM_TARGET = "confirm_target"
     const val CANCEL_TARGET = "cancel_target"
+    const val COMPARE_PRICES = "compare_prices"
 
     const val QUERY_ARGUMENT = "query"
+    const val SECOND_QUERY_ARGUMENT = "other"
 
     /**
      * Routes one call to [actions].
@@ -114,6 +160,11 @@ object AssistantTools {
                 val query = arguments[QUERY_ARGUMENT]?.trim()
                 if (query.isNullOrEmpty()) ToolOutcome.NotOnScreen else actions.selectTarget(query)
             }
+
+            COMPARE_PRICES -> actions.comparePrices(
+                arguments[QUERY_ARGUMENT]?.trim()?.ifEmpty { null },
+                arguments[SECOND_QUERY_ARGUMENT]?.trim()?.ifEmpty { null },
+            )
 
             STOP_GUIDANCE -> actions.stopGuidance()
             READ_SCREEN -> actions.readScreen()

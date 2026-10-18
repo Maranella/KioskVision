@@ -47,6 +47,13 @@ class AssistantToolsTest {
             cancelled = true
             return ToolOutcome.Stopped
         }
+
+        val comparisons = mutableListOf<Pair<String?, String?>>()
+
+        override fun comparePrices(first: String?, second: String?): ToolOutcome {
+            comparisons += first to second
+            return ToolOutcome.Comparing
+        }
     }
 
     @Test
@@ -149,7 +156,7 @@ class AssistantToolsTest {
             listOf(
                 "guiding", "notonscreen", "unconfirmed", "ambiguous",
                 "screennotreadable", "noscreen", "needsconfirmation", "confirmed",
-                "nothingpending", "stopped", "reading",
+                "nothingpending", "stopped", "reading", "comparing", "priceunknown",
             ),
             wire,
         )
@@ -181,5 +188,31 @@ class AssistantToolsTest {
         // the app, in its own voice, from what the camera saw.
         assertEquals(ToolOutcome.Ambiguous, outcome)
         assertEquals("ambiguous", outcome.wireValue)
+    }
+
+    @Test
+    fun `a price comparison reaches the app with both options, or with neither`() {
+        val actions = Recording()
+        AssistantTools.dispatch(
+            AssistantTools.COMPARE_PRICES,
+            mapOf(
+                AssistantTools.QUERY_ARGUMENT to "ამერიკანო",
+                AssistantTools.SECOND_QUERY_ARGUMENT to "ესპრესო",
+            ),
+            actions,
+        )
+        // "Which is cheaper?" with nothing named is a question about the whole screen, and
+        // must arrive as such rather than as an empty string the app would try to match.
+        AssistantTools.dispatch(AssistantTools.COMPARE_PRICES, mapOf(), actions)
+        AssistantTools.dispatch(
+            AssistantTools.COMPARE_PRICES,
+            mapOf(AssistantTools.QUERY_ARGUMENT to "  "),
+            actions,
+        )
+
+        assertEquals(
+            listOf("ამერიკანო" to "ესპრესო", null to null, null to null),
+            actions.comparisons,
+        )
     }
 }

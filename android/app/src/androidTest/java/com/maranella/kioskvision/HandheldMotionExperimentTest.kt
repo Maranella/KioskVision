@@ -14,6 +14,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.maranella.kioskvision.assist.FrameSize
 import com.maranella.kioskvision.assist.GuidanceDirection
 import com.maranella.kioskvision.assist.SpokenMessage
+import com.maranella.kioskvision.haptics.HapticCue
 import com.maranella.kioskvision.camera.AnalysisFrame
 import com.maranella.kioskvision.hand.HandLandmarkTracker
 import com.maranella.kioskvision.ocr.KioskOcrEngine
@@ -412,6 +413,9 @@ class HandheldMotionExperimentTest {
         override fun onSession(snapshot: SessionSnapshot) = Unit
         override fun onDebugFrame(frame: DebugFrame) { debug = frame }
         override fun onFocusRequested() = Unit
+
+        // The approach rhythm is felt, not measured here; this experiment scores spoken cues.
+        override fun onHaptic(cue: HapticCue) = Unit
     }
 
     private companion object {

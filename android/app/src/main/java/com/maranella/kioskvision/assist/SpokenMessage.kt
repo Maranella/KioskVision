@@ -24,6 +24,30 @@ sealed interface SpokenMessage {
     data class TargetNotFound(val query: String) : SpokenMessage
     data class TargetAmbiguous(val first: String, val second: String) : SpokenMessage
     data class ScreenContents(val reading: ScreenReading) : SpokenMessage
+
+    /**
+     * The amount printed next to one option, said by the app itself.
+     *
+     * The value comes from [OptionPricing], which attaches an amount to an option only when
+     * the layout leaves little room for another reading. The assistant is never told the
+     * number; it asked a question and the app answers it out loud from what the camera saw.
+     */
+    data class OptionPrice(val label: String, val price: Money) : SpokenMessage
+
+    /** Two options compared by price, cheaper one first. */
+    data class CheaperOption(
+        val cheaper: String,
+        val cheaperPrice: Money,
+        val other: String,
+        val otherPrice: Money,
+    ) : SpokenMessage
+
+    /**
+     * Prices are on the screen, or may be, but none could be attached to an option with
+     * enough confidence to say aloud. Deliberately distinct from [NoTextVisible]: the fix is
+     * to hold the phone closer or steadier, not to find a screen.
+     */
+    data object PriceNotReadable : SpokenMessage
     data object NoTextVisible : SpokenMessage
     data object TextRecognitionNotReady : SpokenMessage
     data object ScreenChanged : SpokenMessage
@@ -55,6 +79,17 @@ sealed interface SpokenMessage {
     data object HoldStill : SpokenMessage
     data object GuidanceStopped : SpokenMessage
     data object NotUnderstood : SpokenMessage
+
+    /**
+     * The streaming assistant has stopped and will not come back on its own.
+     *
+     * Said out loud because the failure is otherwise undetectable. The microphone simply stops
+     * being streamed and the app goes quiet, which to a blind user is indistinguishable from an
+     * assistant that has nothing to say. The wording names what still works - the camera, the
+     * screen reading and the guidance are all local - so the user is not left believing the
+     * whole app has died.
+     */
+    data object VoiceAssistantUnavailable : SpokenMessage
     data class RecognitionFailed(val reason: RecognitionFailure) : SpokenMessage
 }
 

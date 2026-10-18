@@ -20,6 +20,44 @@ data class ScreenCandidate(
 )
 
 /**
+ * Why a frame produced no screen candidate.
+ *
+ * Diagnostic only — nothing reads this to make a decision. It exists because a bare null is
+ * indistinguishable between "there is no bright region at all", "the bright region is the
+ * ceiling light", and "the screen is there but smaller than the detector will accept", and
+ * those three need completely different fixes. Without it, a device session at a machine that
+ * does not work yields no information beyond "it does not work".
+ */
+enum class ScreenRejection {
+    /** The grid was the wrong size, or Otsu found no split at all (a flat image). */
+    NoThreshold,
+
+    /** Nothing passed the bright threshold as a connected region. */
+    NoBrightRegion,
+
+    /**
+     * A bright region was found and is **smaller than [ScreenDetector.MIN_COVERAGE]**.
+     *
+     * The first thing to check on any small screen. The bound was chosen for a payment
+     * terminal, which fills much of the frame at reading distance; a small display filmed from
+     * far enough back to also show the user's hand may never reach it.
+     */
+    TooSmall,
+
+    /** Larger than [ScreenDetector.MAX_COVERAGE]: usually the lens against a lit surface. */
+    TooLarge,
+
+    /** The region's outline had too few boundary points to hull. */
+    HullTooSmall,
+
+    /** No four hull points could be chosen. */
+    NoCorners,
+
+    /** Four corners were found but enclose no area. */
+    DegenerateQuad,
+}
+
+/**
  * Finds the bright rectangular region a kiosk screen forms against a darker housing.
  *
  * **Why not OpenCV.** A contour-and-approxPolyDP pipeline is the textbook answer, but it costs
@@ -41,20 +79,96 @@ class ScreenDetector(
     /**
      * @param luminance row-major luminance in 0..255, [width] x [height].
      */
-    fun detect(luminance: IntArray, width: Int, height: Int): ScreenCandidate? {
-        if (width < MIN_GRID || height < MIN_GRID) return null
-        if (luminance.size != width * height) return null
+    /**
+     * Why the last call to [detect] returned null, or null when it returned a candidate.
+     *
+     * Written during [detect] and read from the same thread (the pipeline's). Purely
+     * diagnostic: no decision anywhere consults it.
+     */
+    var lastRejection: ScreenRejection? = null
+        private set
 
-        val threshold = brightThreshold(luminance) ?: return null
+    /**
+     * Fraction of the grid the largest bright region covered on the last call, or -1 when the
+     * call did not get as far as measuring one.
+     *
+     * Reported even when the region was rejected, because the rejected value is the diagnosis:
+     * a coverage of 0.02 against a 0.08 floor says the screen is too small in frame, which no
+     * amount of staring at a preview reveals.
+     */
+    var lastCoverage: Float = -1f
+        private set
+
+    /** The three parts of the last candidate's confidence, or -1 when none was scored. */
+    var lastFill: Float = -1f
+        private set
+    var lastRectangularity: Float = -1f
+        private set
+    var lastSeparation: Float = -1f
+        private set
+
+    /**
+     * Scores a region that was refused for being too small, **without accepting it**.
+     *
+     * The bound that refused it was chosen for a payment terminal, and a coffee machine
+     * produced coverages of 0.055-0.079 at the distance where the app read its screen well.
+     * Whether those were genuine screens or bright clutter is exactly what the confidence
+     * score would say, and the early return meant it was never calculated. Recording it here
+     * costs one hull on a frame that is being thrown away anyway, and is the only way to learn
+     * whether a confidence gate could admit the machine without admitting the room.
+     */
+    private fun probeConfidence(luminance: IntArray, mask: BooleanArray, threshold: Int, component: Component) {
+        if (lastCoverage < PROBE_COVERAGE) return
+        val hull = convexHull(component.points) ?: return
+        val corners = dominantCorners(hull) ?: return
+        val quad = Quad.ordered(corners) ?: return
+        if (quad.area <= 0f) return
+        lastFill = (component.size.toFloat() / quad.area).coerceIn(0f, 1f)
+        lastRectangularity = rectangularity(quad)
+        lastSeparation = separation(luminance, mask, threshold)
+        lastRejectedConfidence =
+            (lastFill * 0.4f + lastRectangularity * 0.4f + lastSeparation * 0.2f).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Confidence a too-small candidate would have scored, or -1 when none was measured.
+     * Diagnostic only: nothing reads it to make a decision.
+     */
+    var lastRejectedConfidence: Float = -1f
+        private set
+
+    private fun reject(reason: ScreenRejection): ScreenCandidate? {
+        lastRejection = reason
+        return null
+    }
+
+    fun detect(luminance: IntArray, width: Int, height: Int): ScreenCandidate? {
+        lastRejection = null
+        lastCoverage = -1f
+        lastRejectedConfidence = -1f
+        lastFill = -1f
+        lastRectangularity = -1f
+        lastSeparation = -1f
+
+        if (width < MIN_GRID || height < MIN_GRID) return reject(ScreenRejection.NoThreshold)
+        if (luminance.size != width * height) return reject(ScreenRejection.NoThreshold)
+
+        val threshold = brightThreshold(luminance) ?: return reject(ScreenRejection.NoThreshold)
         val mask = BooleanArray(luminance.size) { luminance[it] >= threshold }
-        val component = largestComponent(mask, width, height) ?: return null
+        val component = largestComponent(mask, width, height) ?: return reject(ScreenRejection.NoBrightRegion)
 
         val coverage = component.size.toFloat() / (width * height)
-        if (coverage < minCoverage || coverage > maxCoverage) return null
+        lastCoverage = coverage
+        if (coverage < minCoverage) {
+            probeConfidence(luminance, mask, threshold, component)
+            return reject(ScreenRejection.TooSmall)
+        }
+        if (coverage > maxCoverage) return reject(ScreenRejection.TooLarge)
 
-        val hull = convexHull(component.points) ?: return null
-        val quad = Quad.ordered(dominantCorners(hull) ?: return null) ?: return null
-        if (quad.area <= 0f) return null
+        val hull = convexHull(component.points) ?: return reject(ScreenRejection.HullTooSmall)
+        val corners = dominantCorners(hull) ?: return reject(ScreenRejection.NoCorners)
+        val quad = Quad.ordered(corners) ?: return reject(ScreenRejection.DegenerateQuad)
+        if (quad.area <= 0f) return reject(ScreenRejection.DegenerateQuad)
 
         // A screen is convex and roughly rectangular. Comparing the quad's own area against
         // the pixels it is supposed to contain catches L-shapes and spills into bright
@@ -62,6 +176,9 @@ class ScreenDetector(
         val fill = (component.size.toFloat() / quad.area).coerceIn(0f, 1f)
         val rectangularity = rectangularity(quad)
         val separation = separation(luminance, mask, threshold)
+        lastFill = fill
+        lastRectangularity = rectangularity
+        lastSeparation = separation
         val confidence = (fill * 0.4f + rectangularity * 0.4f + separation * 0.2f).coerceIn(0f, 1f)
 
         return ScreenCandidate(quad, confidence, coverage)
@@ -237,15 +354,49 @@ class ScreenDetector(
         return (gap / 128.0).coerceIn(0.0, 1.0).toFloat()
     }
 
-    private companion object {
-        const val MIN_GRID = 16
+    companion object {
+        private const val MIN_GRID = 16
 
         /**
-         * A screen smaller than this is too far away to read anyway, and a "screen" larger
-         * than the upper bound is usually the camera pressed against a lit surface.
+         * Smallest bright region that may be a screen, as a fraction of frame **area**.
+         *
+         * **Was 0.08, lowered on measurement.** That figure was chosen for a payment terminal,
+         * which fills much of the frame at reading distance, and its comment reasoned that
+         * anything smaller "is too far away to read anyway". A coffee machine disproved the
+         * reasoning: at the distance where the app read the screen well — 42 to 46 recognised
+         * lines, a target selected and guidance running — the detector was still refusing the
+         * frame, reporting coverage of **0.055, 0.058, 0.077 and 0.079** against the 0.08
+         * bound, 23 times in one session. The screen was perfectly readable and the detector
+         * called it too small.
+         *
+         * Each refusal left no geometry, so guidance was withdrawn as `ScreenNotTracked` and
+         * the whole-frame scan path was used instead — slower, and the source of the runs that
+         * had to be cut short by the OCR time budget.
+         *
+         * **Lowering it to 0.04 was tried and reverted.** At the machine it did what was
+         * intended, but everywhere else it admitted weak candidates that had been refused
+         * before — a ceiling light, a window, a laptop screen across a cafeteria. Measured on
+         * the device, detector confidence fell from the **0.89-0.97** seen on the real machine
+         * to **0.56-0.62** on a room, while `MIN_CONFIDENCE` is only 0.45, so all of it was
+         * accepted. OCR was then pointed at furniture and returned 433-657 blocks per run,
+         * every one discarded as noise, at 12-22 seconds a run.
+         *
+         * Coverage alone cannot separate those two cases: a small screen and a bright patch of
+         * wall are the same size in frame. What appears to separate them is how convincingly
+         * rectangular and separated the region is — the confidence score — but the early
+         * return below means that score has **never been computed** for a sub-threshold
+         * candidate, so there is no evidence for where a gate would sit. [probeConfidence]
+         * measures exactly that, while still refusing the frame, so the next device session
+         * can settle it. Do not lower this bound again until those numbers exist.
          */
         const val MIN_COVERAGE = 0.08f
+
+        /**
+         * Coverage below which a candidate is not even measured. Between this and
+         * [MIN_COVERAGE] the region is scored for diagnosis only, and still refused.
+         */
+        const val PROBE_COVERAGE = 0.03f
         const val MAX_COVERAGE = 0.95f
-        const val MAX_HULL = 24
+        private const val MAX_HULL = 24
     }
 }

@@ -29,6 +29,9 @@
     <string name="action_not_now">ახლა არა</string>
     <string name="status_listening">გისმენთ… თქვით, რა გსურთ.</string>
     <string name="label_heard">გავიგე: %1$s</string>
+    <string name="status_voice_connecting">ასისტენტი უკავშირდება…</string>
+    <string name="status_voice_reconnecting">ასისტენტთან კავშირი გაწყდა. ხელახლა ვუკავშირდები…</string>
+    <string name="status_voice_unavailable">ასისტენტი მიუწვდომელია. კამერა, ეკრანის კითხვა და მიმართულება მაინც მუშაობს.</string>
     <string name="label_target">სამიზნე: %1$s</string>
     <string name="label_guidance">მიმართულება: %1$s</string>
     <string name="label_target_reached">ღილაკთან ხართ. დააჭირეთ თავად.</string>
@@ -63,6 +66,12 @@
     <string name="speak_target_ambiguous">რომელი: %1$s თუ %2$s?</string>
     <string name="speak_screen_contents">ეკრანზე: %1$s.</string>
     <string name="speak_screen_some_unreadable">ზოგიერთი ტექსტი საიმედოდ ვერ წავიკითხე.</string>
+    <string name="speak_money_lari">%1$d ლარი</string>
+    <string name="speak_money_lari_tetri">%1$d ლარი და %2$d თეთრი</string>
+    <string name="speak_money_tetri">%1$d თეთრი</string>
+    <string name="speak_option_price">%1$s — %2$s.</string>
+    <string name="speak_cheaper_option">%1$s უფრო იაფია, %2$s. %3$s კი %4$s.</string>
+    <string name="speak_price_not_readable">ამ ეკრანზე ფასებს საიმედოდ ვერ ვკითხულობ.</string>
     <string name="speak_no_text_visible">ტექსტს ვერ ვხედავ. კამერა ეკრანისკენ მიმართე.</string>
     <string name="speak_ocr_not_ready">ტექსტის ამოცნობა ჯერ მზად არ არის.</string>
     <string name="speak_screen_changed">ეკრანი შეიცვალა.</string>
@@ -75,6 +84,7 @@
     <string name="speak_hold_still">ეკრანი ერთი წამით დამანახე.</string>
     <string name="speak_guidance_stopped">მიმართულება შეჩერდა.</string>
     <string name="speak_not_understood">ვერ გავიგე. სცადე ხელახლა.</string>
+    <string name="speak_assistant_unavailable">ხმოვანი ასისტენტი მიუწვდომელია. ეკრანს მაინც წავიკითხავ და თითს მივახელმძღვანელებ. ხელახლა საცდელად დააჭირე მოსმენის ღილაკს.</string>
     <string name="speak_recognition_no_speech">ვერაფერი გავიგე.</string>
     <string name="speak_recognition_network">მეტყველების ამოცნობას ინტერნეტი სჭირდება.</string>
     <string name="speak_recognition_language">ქართული მეტყველების ამოცნობა ამ მოწყობილობაზე მიუწვდომელია.</string>

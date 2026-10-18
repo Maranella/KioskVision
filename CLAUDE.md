@@ -18,11 +18,20 @@ the final press themselves. The app never autonomously executes a transaction.
 
 **Android implementation, with the core feasibility question still open.**
 
-The Android app exists and is substantial: ~5,800 lines of Kotlin under
-`android/`, 130 unit tests and 15 instrumented tests, all passing. It covers
-camera capture with focus lock, Georgian OCR (Tesseract), hand landmarks
-(MediaPipe), persistent target tracking, directional guidance, Georgian spoken
-commands, and a Gemini Live voice spike.
+The Android app exists and is substantial: ~9,600 lines of Kotlin under
+`android/app/src/main` (~15,700 including tests), **256 unit tests** and 19
+instrumented tests. The unit tests were re-run from a clean task state on
+2026-10-17 (`./gradlew testDebugUnitTest --rerun-tasks`): 256 passed, 0 failed.
+It was 246 earlier that day; twelve tests covering a voice-arbitration path that
+production never called were replaced by thirteen covering the policy that does
+(R-27). The instrumented tests were **not** run — no device was attached — and
+until R-27 they did not compile at all.
+
+It covers camera capture with focus lock, Georgian OCR (Tesseract), hand
+landmarks (MediaPipe), kiosk-screen detection and rectified screen-space
+guidance, persistent target tracking, directional guidance, haptic approach
+cues, a goal carried across screens, and a Gemini Live voice session the app
+drives itself.
 
 **What that does not mean.** No milestone in `MVP_AND_ACCEPTANCE_CRITERIA.md`
 has passed its acceptance criteria. Every measurement so far comes from
@@ -31,15 +40,32 @@ yet pointed this app at a real kiosk, and the central interaction — a blind
 user's finger guided to a real button by spoken Georgian — has never been
 performed end to end.
 
-Two gaps are structural rather than unfinished work, and are recorded in
+**Kiosk-screen detection now exists.** Earlier revisions of this section said
+it did not; that was true until commit `f6a4e12` (2026-10-16, R-21).
+`camera/ScreenDetector.kt` finds the bright quadrilateral, `ScreenTracker.kt`
+smooths and ages it, `Homography.kt` solves the four-point transform and
+`ScreenSpace.kt` is the single place frame and screen coordinates convert.
+`LiveAssistPipeline.guidanceInput` rectifies both the target box and the
+fingertip before the engine sees them, and refuses with
+`GuidanceUnavailable.ScreenNotTracked` rather than falling back to camera
+pixels. `camera/FrameGeometry.kt` no longer approximates the screen; it defines
+the buffer / frame / view coordinate systems only.
+
+What that is **not**: it is unit-tested and exercised on rendered frames. The
+detector's central assumption — that the kiosk screen is the brightest large
+convex region — has never been tested against a window, a ceiling light or a
+glossy reflection. Corner quantization is a live limitation too: detection runs
+on a 64×64 luminance grid, so a corner is localized to roughly 11 px across and
+20 px down on a 720×1280 frame, which is the same order as the on-target zone.
+
+One gap is structural rather than unfinished work, and is recorded in
 `SPIKES_AND_DECISIONS.md`:
 
-- **No kiosk-screen detection.** `camera/FrameGeometry.kt` approximates the
-  screen by the whole camera frame, with no quadrilateral detection and no
-  perspective correction. Product milestone M1 cannot pass without it.
 - **Fingertip guidance may not be reachable on this hardware.** MediaPipe
   needs most of the hand in frame (R-13) while reading a 2 cm label needs the
   phone close, and Android has no depth sensor to resolve the parallax (R-07).
+  Rectification removes perspective error **in the screen plane** and does
+  nothing about a finger held above the glass.
 
 Treat phase claims with suspicion and check the code before repeating them —
 this section itself said "no application code exists yet" for two milestones

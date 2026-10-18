@@ -19,6 +19,7 @@ import com.maranella.kioskvision.assist.FrameSize
 import com.maranella.kioskvision.assist.TargetMatcher
 import com.maranella.kioskvision.assist.TextBox
 import com.maranella.kioskvision.camera.FrameGeometry
+import com.maranella.kioskvision.camera.ScreenDetector
 import com.maranella.kioskvision.pipeline.DebugFrame
 import java.util.Locale
 
@@ -102,6 +103,12 @@ private fun DrawScope.drawBox(
     drawRect(color, topLeft, Size(bottomRight.x - topLeft.x, bottomRight.y - topLeft.y), style = Stroke(width))
 }
 
+/** `ScreenDetector.MIN_COVERAGE` as a percentage, for the overlay's "needs" figure. */
+private const val MIN_COVERAGE_PERCENT = ScreenDetector.MIN_COVERAGE * 100f
+
+/** Raw OCR lines to show. Enough to see what a screen says without burying the rest. */
+private const val MAX_RAW_LINES = 8
+
 private fun DebugFrame.describe(): String = buildString {
     appendLine("phase $phase")
     appendLine(
@@ -112,19 +119,50 @@ private fun DebugFrame.describe(): String = buildString {
             if (frameLuminance in 0f..25f) "  ← BLACK IMAGE" else "",
         ),
     )
+    // When no screen is tracked, *why* is the whole diagnosis. A bare "NOT TRACKED" cannot
+    // distinguish a machine whose display is smaller than the detector accepts from one whose
+    // housing is brighter than its screen, and those need opposite fixes.
     appendLine(
         if (screenQuad == null) {
-            "screen NOT TRACKED — no precise directions"
+            String.format(
+                Locale.ROOT,
+                "screen NOT TRACKED — %s  area %.1f%% of frame (needs %.0f%%)",
+                screenRejection ?: screenLoss ?: "no reason recorded",
+                screenCoverage * 100f,
+                MIN_COVERAGE_PERCENT,
+            )
         } else {
             String.format(
                 Locale.ROOT,
-                "screen conf %.2f  %s  age %dms  geom v%d",
+                "screen conf %.2f  %s  age %dms  geom v%d  %s",
                 screenConfidence,
                 if (screenStable) "stable" else "settling",
                 screenAgeMs ?: -1L,
                 geometryVersion,
+                if (rectifies) "rectifies" else "WILL NOT RECTIFY",
             )
         },
+    )
+    if (screenQuad == null && screenCoverage >= 0f) {
+        appendLine(
+            String.format(
+                Locale.ROOT,
+                "  detector  fill %.2f  rect %.2f  separation %.2f",
+                screenFill, screenRectangularity, screenSeparation,
+            ),
+        )
+    }
+    // How far acquisition has got, and the two counters that gate it. A screen that never
+    // reaches ScreenReady is almost always short of one of these, and neither was visible.
+    appendLine(
+        String.format(
+            Locale.ROOT,
+            "acquire  runs %d/%d  lines %d/%d  scan %s at %.1fx",
+            consistentRuns, acquisitionRunsNeeded,
+            retainedLines, informativeLinesNeeded,
+            if (scanCroppedToScreen) "cropped" else "WHOLE FRAME",
+            fullScanUpscale,
+        ),
     )
     // The error vector guidance is acting on, in units of the on-target zone. Printed because
     // the drawn line shows direction but not how close "close" actually is.
@@ -136,8 +174,22 @@ private fun DebugFrame.describe(): String = buildString {
     appendLine(
         "ocr ${if (ocrRunning) "RUNNING" else "idle"}  last ${ocrMs}ms" +
             (sinceLastOcrMs?.let { "  ${it}ms ago" } ?: "  never") +
-            "  jobs $ocrJobsStarted",
+            "  jobs $ocrJobsStarted  lang $ocrLanguages",
     )
+    // What Tesseract was actually given. "OCR read nothing" and "OCR was shown the wrong
+    // pixels" look identical without it.
+    ocrInput?.let { appendLine("  in  $it") }
+    // Raw output against what survived intake. This is the line that separates a recognition
+    // failure from a filtering one, which the block list above cannot: it is already filtered.
+    appendLine(
+        "  out raw $ocrRawBlocks  kept $ocrRetainedBlocks" +
+            (if (ocrDroppedLowConfidence > 0) "  low-conf $ocrDroppedLowConfidence" else "") +
+            (if (ocrDroppedTooFewLetters > 0) "  <2 letters $ocrDroppedTooFewLetters" else "") +
+            if (ocrRawBlocks > 0 && ocrRetainedBlocks == 0) "  ← ALL DISCARDED" else "",
+    )
+    // Kiosk screen content: shown here, on the device, and never logged.
+    ocrRawText.take(MAX_RAW_LINES).forEach { appendLine("    $it") }
+    if (ocrRawText.size > MAX_RAW_LINES) appendLine("    … ${ocrRawText.size - MAX_RAW_LINES} more")
     appendLine("anchor ${anchorMs}ms  jobs $anchorJobsStarted  blur-skips $blurSkips")
     appendLine(
         "hand " + (if (handsSeen > 0) "${handsSeen}/${handInferences} seen" else "NEVER SEEN in $handInferences") +

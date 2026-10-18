@@ -31,6 +31,9 @@
     <string name="action_not_now">Not now</string>
     <string name="status_listening">Listening… say what you want.</string>
     <string name="label_heard">Heard: %1$s</string>
+    <string name="status_voice_connecting">Connecting the assistant…</string>
+    <string name="status_voice_reconnecting">Assistant connection lost. Reconnecting…</string>
+    <string name="status_voice_unavailable">Assistant unavailable. Camera, screen reading and guidance still work.</string>
     <string name="label_target">Target: %1$s</string>
     <string name="label_guidance">Guidance: %1$s</string>
     <string name="label_target_reached">At the button. You press it yourself.</string>
@@ -65,6 +68,13 @@
     <string name="speak_target_ambiguous">Which one: %1$s or %2$s?</string>
     <string name="speak_screen_contents">On the screen: %1$s.</string>
     <string name="speak_screen_some_unreadable">Some text could not be read reliably.</string>
+    <!-- Amounts. Spoken in words rather than as "3.50" so a Georgian voice reads them as money. -->
+    <string name="speak_money_lari">%1$d lari</string>
+    <string name="speak_money_lari_tetri">%1$d lari %2$d tetri</string>
+    <string name="speak_money_tetri">%1$d tetri</string>
+    <string name="speak_option_price">%1$s: %2$s.</string>
+    <string name="speak_cheaper_option">%1$s is cheaper, %2$s. %3$s is %4$s.</string>
+    <string name="speak_price_not_readable">I cannot read the prices on this screen reliably.</string>
     <string name="speak_no_text_visible">I can\'t see any text. Point the camera at the screen.</string>
     <string name="speak_ocr_not_ready">Text recognition is not ready.</string>
     <string name="speak_screen_changed">The screen changed.</string>
@@ -77,6 +87,9 @@
     <string name="speak_hold_still">Let me see the screen for a moment.</string>
     <string name="speak_guidance_stopped">Guidance stopped.</string>
     <string name="speak_not_understood">I didn\'t understand. Try again.</string>
+    <!-- The streaming assistant gave up reconnecting. Names what still works, because
+         everything except the conversation is on the device. -->
+    <string name="speak_assistant_unavailable">The voice assistant is unavailable. I can still read the screen and guide your finger. Press the listen button to try again.</string>
     <string name="speak_recognition_no_speech">I didn\'t hear anything.</string>
     <string name="speak_recognition_network">Speech recognition needs an internet connection.</string>
     <string name="speak_recognition_language">Georgian speech recognition is not available on this device.</string>

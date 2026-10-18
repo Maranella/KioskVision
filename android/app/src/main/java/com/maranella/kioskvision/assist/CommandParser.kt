@@ -6,6 +6,18 @@ sealed interface AssistCommand {
     data object ReadScreen : AssistCommand
     data object Repeat : AssistCommand
     data object Stop : AssistCommand
+
+    /**
+     * The user agreed to be guided to the control that was just offered.
+     *
+     * Needed because nothing is guided to until they say so (M6), and without a local word for
+     * "yes" the offline path could offer a control and then have no way to accept it — „დიახ"
+     * would be matched against the screen as if it were a button.
+     */
+    data object Confirm : AssistCommand
+
+    /** The user declined the offered control. */
+    data object Cancel : AssistCommand
     data object Unknown : AssistCommand
 }
 
@@ -22,6 +34,16 @@ object CommandParser {
         "რა წერია", "რა არის ეკრანზე", "წაიკითხე", "წამიკითხე", "რა ღილაკებია", "what is on the screen", "read",
     )
 
+    // Checked before a target query, so an answer to the app's own question is never searched
+    // for on the screen. Cancel comes first: „არა, სხვა" is a refusal, not a request for
+    // something called "სხვა".
+    private val cancelPhrases = listOf(
+        "არა", "არ მინდა", "არ არის", "სხვა მინდა", "არა სხვა", "no", "cancel it",
+    )
+    private val confirmPhrases = listOf(
+        "დიახ", "კი", "ხო", "კარგი", "დამეთანხმე", "დადასტურე", "მიმიყვანე", "yes", "ok", "okay",
+    )
+
     /** Words that express wanting/asking rather than naming an option. */
     private val fillerWords = setOf(
         "მინდა", "მსურს", "მჭირდება", "გთხოვ", "გთხოვთ", "მაჩვენე", "მიჩვენე", "მიპოვე", "მომიძებნე",
@@ -35,6 +57,8 @@ object CommandParser {
         if (stopPhrases.any { text.containsPhrase(it) }) return AssistCommand.Stop
         if (repeatPhrases.any { text.containsPhrase(it) }) return AssistCommand.Repeat
         if (readScreenPhrases.any { text.containsPhrase(it) }) return AssistCommand.ReadScreen
+        if (cancelPhrases.any { text.containsPhrase(it) }) return AssistCommand.Cancel
+        if (confirmPhrases.any { text.containsPhrase(it) }) return AssistCommand.Confirm
 
         val query = TextNormalizer.tokens(text).filterNot { it in fillerWords }.joinToString(" ")
         return if (query.isEmpty()) AssistCommand.Unknown else AssistCommand.SelectTarget(query)

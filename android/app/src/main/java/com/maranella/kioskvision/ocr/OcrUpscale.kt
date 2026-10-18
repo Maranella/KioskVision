@@ -1,5 +1,7 @@
 package com.maranella.kioskvision.ocr
 
+import kotlin.math.sqrt
+
 /**
  * How much to magnify an image before recognition.
  *
@@ -28,5 +30,32 @@ object OcrUpscale {
         val sorted = heights.sorted()
         val median = sorted[sorted.size / 2]
         return if (median < SMALL_TEXT_FRACTION * frameHeight) FACTOR else 1f
+    }
+
+    /**
+     * Most pixels Tesseract may be given in one run.
+     *
+     * Measured on the device: crops of about 1.7 MP finished in 2.0-2.8 s, while whole frames
+     * at 3.0 MP took 12-26 s. The bound sits just above the fast side of that gap.
+     */
+    const val MAX_PIXELS = 1_800_000.0
+
+    /**
+     * Reduces [wanted] until an image of [width] x [height] magnified by it fits [MAX_PIXELS].
+     *
+     * `KioskOcrEngine`'s time budget asks Tesseract to stop, and that is not enough on its own:
+     * runs asked to stop at 8 s were measured still taking 18-26 s, and `ocrInFlight` blocks
+     * every other scan for the whole of it. One such run swallowed a guidance window outright —
+     * `anchorJobs=0` while a target was held, so its position was never refreshed and guidance
+     * died within six seconds of starting.
+     *
+     * This bound is deterministic and applied before any work begins. Magnification is cut
+     * rather than the image, because cropping would lose labels outright, and a frame read at
+     * 1.5x is still read.
+     */
+    fun cappedToPixelBudget(wanted: Float, width: Int, height: Int): Float {
+        val pixels = width.toDouble() * height
+        if (pixels <= 0.0) return wanted
+        return wanted.coerceAtMost(sqrt(MAX_PIXELS / pixels).toFloat()).coerceAtLeast(1f)
     }
 }

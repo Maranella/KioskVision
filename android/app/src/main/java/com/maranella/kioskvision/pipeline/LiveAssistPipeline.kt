@@ -28,6 +28,7 @@ import com.maranella.kioskvision.assist.ObservedLabel
 import com.maranella.kioskvision.camera.Point
 import com.maranella.kioskvision.camera.Quad
 import com.maranella.kioskvision.camera.ScreenDetector
+import com.maranella.kioskvision.camera.ScreenRejection
 import com.maranella.kioskvision.camera.ScreenLoss
 import com.maranella.kioskvision.camera.ScreenSpace
 import com.maranella.kioskvision.camera.ScreenTracker
@@ -43,6 +44,10 @@ import com.maranella.kioskvision.assist.TextNormalizer
 import com.maranella.kioskvision.camera.AnalysisFrame
 import com.maranella.kioskvision.camera.CameraFrameAnalyzer
 import com.maranella.kioskvision.camera.FocusState
+import com.maranella.kioskvision.diag.LatencyTracker
+import com.maranella.kioskvision.diag.UnresolvedInterval
+import com.maranella.kioskvision.haptics.HapticCue
+import com.maranella.kioskvision.haptics.HapticGuidance
 import com.maranella.kioskvision.camera.FrameQuality
 import com.maranella.kioskvision.hand.HandLandmarkTracker
 import com.maranella.kioskvision.ocr.KioskOcrEngine
@@ -52,6 +57,7 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import kotlin.math.sqrt
 
 /**
  * Where the session is, and therefore what the camera pipeline is for right now.
@@ -170,6 +176,72 @@ data class DebugFrame(
      */
     val frameLuminance: Float = -1f,
     val referenceSharpness: Float,
+
+    // --- Why screen understanding is not happening ------------------------------------------
+    //
+    // Added because a session at a machine that does not work produced no information beyond
+    // "it does not work". Each of these answers one question a person standing at the machine
+    // would otherwise have to guess at.
+
+    /** [ScreenRejection] name when the detector refused the last frame it looked at. */
+    val screenRejection: String? = null,
+
+    /** Fraction of the frame the largest bright region covered; -1 when not measured. */
+    val screenCoverage: Float = -1f,
+
+    /** The parts of the detector's confidence score: fill, rectangularity, separation. */
+    val screenFill: Float = -1f,
+    val screenRectangularity: Float = -1f,
+    val screenSeparation: Float = -1f,
+
+    /** [ScreenLoss] name when geometry is unusable, or null when it is fine. */
+    val screenLoss: String? = null,
+
+    /** False when a tracked quadrilateral is too degenerate to invert into screen space. */
+    val rectifies: Boolean = false,
+
+    /** Consistent OCR runs so far, against the number acquisition requires. */
+    val consistentRuns: Int = 0,
+    val acquisitionRunsNeeded: Int = 0,
+
+    /** Lines OCR is currently holding, against the number a screen must show to count. */
+    val retainedLines: Int = 0,
+    val informativeLinesNeeded: Int = 0,
+
+    /** Magnification the next full-frame scan would use. 1 means none. */
+    val fullScanUpscale: Float = 1f,
+
+    /** True when a full scan is cropped to the tracked screen rather than reading everything. */
+    val scanCroppedToScreen: Boolean = false,
+
+    // --- What OCR was actually given, and what became of what it returned --------------------
+    //
+    // [blocks] above is `TargetTracker.snapshot`, which is OCR output **after** intake
+    // filtering. On its own it cannot distinguish "Tesseract read nothing" from "Tesseract read
+    // the screen and the app threw it away", and those have opposite fixes.
+
+    /** The exact input handed to Tesseract: crop bounds, pixel size and magnification. */
+    val ocrInput: String? = null,
+
+    /** Languages Tesseract was initialised with. */
+    val ocrLanguages: String = "",
+
+    /** Blocks Tesseract returned on the last full run, before any filtering. */
+    val ocrRawBlocks: Int = 0,
+
+    /** Of those, how many intake kept, and why the rest were dropped. */
+    val ocrRetainedBlocks: Int = 0,
+    val ocrDroppedLowConfidence: Int = 0,
+    val ocrDroppedTooFewLetters: Int = 0,
+
+    /**
+     * Raw recognised text from the last full run, newest first.
+     *
+     * Kiosk screen content, so it is carried here — rendered only by the developer overlay on
+     * a debuggable build — and deliberately **never written to logcat**, which leaves the
+     * device. Only the counts above are logged.
+     */
+    val ocrRawText: List<String> = emptyList(),
 )
 
 /**
@@ -201,6 +273,15 @@ class LiveAssistPipeline(
 
         /** Asks the camera layer to focus on the kiosk screen. Called off the main thread. */
         fun onFocusRequested()
+
+        /**
+         * One beat of the approach rhythm, decided per frame on the pipeline thread.
+         *
+         * Emitted here rather than derived from [SessionSnapshot] because the rhythm needs the
+         * fingertip's distance on every frame, while snapshots are published only when the
+         * spoken direction changes.
+         */
+        fun onHaptic(cue: HapticCue)
     }
 
     private val pipelineThread = Executors.newSingleThreadExecutor { Thread(it, "assist-pipeline") }
@@ -247,7 +328,32 @@ class LiveAssistPipeline(
     /** True while the microphone is open, so guidance speech is not recognized as a command. */
     @Volatile var speechMuted = false
 
-    val analyzer = CameraFrameAnalyzer(isActive = { !released }, onFrame = ::processFrame)
+    val analyzer = CameraFrameAnalyzer(isActive = ::framesWorthConverting, onFrame = ::processFrame)
+
+    /**
+     * Whether an arriving camera frame is worth converting at all.
+     *
+     * Called on the analysis executor, which **is** the pipeline thread (CameraX is given
+     * [executor]), so reading [phase] here needs no synchronisation.
+     *
+     * In [AssistancePhase.Idle] and [AssistancePhase.Error] nothing consumes a frame: screen
+     * detection returns immediately, OCR is scheduled in neither phase, and guidance runs only
+     * while guiding. Yet every frame was still being rotated into a new bitmap and put through
+     * MediaPipe at 55-68 ms a time (R-11). After the user pressed Stop that continued for as
+     * long as the screen stayed open — the single clearest case of continuous work with no
+     * consumer, and the reason this gate exists.
+     *
+     * Returning false here is strictly cheaper than returning true: the `ImageProxy` is still
+     * closed on exactly the same path, two bitmap allocations and a full-frame blit are skipped,
+     * and no observable behaviour changes. Frames are still let through while the developer
+     * overlay is on, so it does not freeze on a stopped session and misreport the pipeline as
+     * hung.
+     */
+    private fun framesWorthConverting(): Boolean {
+        if (released) return false
+        if (debugEnabled) return true
+        return phase != AssistancePhase.Idle && phase != AssistancePhase.Error
+    }
 
     /**
      * Feeds one already-upright frame, exactly as [analyzer] does for a camera frame.
@@ -268,9 +374,24 @@ class LiveAssistPipeline(
     private var lastScreenDetectMs = 0L
     private var frameId = 0L
     private var lastFrameLuminance = -1f
-    private val luminanceScratch = IntArray(SIGNATURE_SOURCE * SIGNATURE_SOURCE)
+    private var lastDecidedDirection: GuidanceDirection? = null
+    private var directionDecidedAtMs = 0L
+    private val luminanceScratch = IntArray(DETECTION_GRID * DETECTION_GRID)
     private val engine = DirectionalGuidanceEngine()
     private val announcer = GuidanceAnnouncer()
+    private val haptics = HapticGuidance()
+
+    // The critical path, stage by stage. Kept apart so a slow stage is identified rather
+    // than inferred: the dominant delay has to be measured before anything is tuned.
+    /** Camera frame to the start of processing: conversion, rotation and queueing. */
+    private val frameLatency = LatencyTracker()
+    private val handLatency = LatencyTracker()
+    private val decisionLatency = LatencyTracker()
+    private val announceLatency = LatencyTracker()
+
+    /** Whole-frame cost, which is what sets the frame rate the finger is tracked at. */
+    private val frameTotalLatency = LatencyTracker()
+    private var lastLatencyLogMs = 0L
     private val smoother = OneEuroFilter2D()
 
     private var phase = AssistancePhase.Idle
@@ -300,9 +421,68 @@ class LiveAssistPipeline(
     private var lastSignatureMs = Long.MIN_VALUE / 2
     private var lastSignatureDistance: Float? = null
     private var screenChangeSuspected = false
+
+    /** A pixel change is waiting for a full scan to become affordable. See [maybeStartOcr]. */
+    private var pendingScreenChange = false
+
+    /**
+     * A suspected screen change that no OCR result has settled yet.
+     *
+     * Distinct from [pendingScreenChange], which is **scheduling**: it says a full scan is
+     * owed and is cleared the moment one is dispatched. This is **trust**, and a dispatched
+     * scan has settled nothing — on this device a full scan takes p50 1202 ms and p90
+     * 2362 ms, and for all of it the labels still belong to the screen before. Clearing trust
+     * at dispatch would leave a one-to-two second window in which the app believed the old
+     * text described the screen in front of the user, which is exactly when a transition is
+     * happening.
+     *
+     * Set when a change is first suspected; cleared only by a result that answers the
+     * question — the transition confirmed, or refuted. A run that could not be read leaves it
+     * standing, because an unreadable frame is not an answer.
+     */
+    private val changeInterval = UnresolvedInterval()
+
+    /** Unchanged in meaning; it is now backed by [changeInterval] so transitions can be timed. */
+    private val changeUnresolved: Boolean get() = changeInterval.isActive
+
+    /**
+     * Records that a suspected change is open, and logs the moment it opens.
+     *
+     * Diagnostic only. The state this sets is the same state the same call sites set before,
+     * under the same conditions — what is added is that a *repeated* assignment is silent and
+     * a first one is timed, so a validation session can count suspicion events and measure
+     * how long the app spent unable to trust the screen.
+     *
+     * No screen text, amount or user speech appears here: a reason, a monotonic timestamp and
+     * the full-scan counter, which is what correlates a line with the `OCR in=` lines around it.
+     */
+    private fun markChangeUnresolved(reason: String, nowMs: Long) {
+        if (changeInterval.begin(nowMs) && diagnosticsEnabled) {
+            Log.i(TAG, "CHANGE-UNRESOLVED SET at=${nowMs}ms reason=$reason scan=$ocrJobsStarted")
+        }
+    }
+
+    /** The other half: logs only when an open interval is actually closed, with its duration. */
+    private fun markChangeResolved(reason: String, nowMs: Long) {
+        val heldMs = changeInterval.end(nowMs) ?: return
+        if (diagnosticsEnabled) {
+            Log.i(
+                TAG,
+                "CHANGE-UNRESOLVED CLEAR at=${nowMs}ms reason=$reason after=${heldMs}ms scan=$ocrJobsStarted",
+            )
+        }
+    }
     private var lastOcrUpdate: String? = null
     /** Why the last spoken request was accepted or turned down, for the developer overlay. */
     private var lastMatchOutcome: String? = null
+
+    /** What the last OCR run was given, and what became of what it returned. */
+    private var lastOcrInput: String? = null
+    private var ocrRawBlocks = 0
+    private var ocrRetainedBlocks = 0
+    private var ocrDroppedLowConfidence = 0
+    private var ocrDroppedTooFewLetters = 0
+    private var ocrRawText: List<String> = emptyList()
 
     private var focusState = FocusState.Unknown
     private var sharpness = 0f
@@ -329,6 +509,9 @@ class LiveAssistPipeline(
     private var scratchBitmap: Bitmap? = null
     private var scratchCanvas: Canvas? = null
     private val scratchPixels = IntArray(SIGNATURE_SOURCE * SIGNATURE_SOURCE)
+    private val detectionPixels = IntArray(DETECTION_GRID * DETECTION_GRID)
+    private var detectionBitmap: Bitmap? = null
+    private var detectionCanvas: Canvas? = null
     private val scratchPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val scratchMatrix = Matrix()
     private var sharpnessPixels: IntArray? = null
@@ -387,6 +570,14 @@ class LiveAssistPipeline(
     fun selectTarget(queries: List<String>) = executor.execute { handleSelect(queries) }
 
     /** Re-reads the kiosk screen from scratch. The current target is given up deliberately. */
+    /**
+     * Asks the OCR engine to write the next image it reads to app-private storage, once.
+     *
+     * Developer action, debug builds only. The single thing missing from every OCR
+     * investigation so far has been the actual input image; this produces it.
+     */
+    fun dumpNextOcrInput() = executor.execute { ocrEngine?.dumpNextInput = true }
+
     fun rescan() = executor.execute {
         if (released || phase == AssistancePhase.Error) return@execute
         tracker.clearTarget()
@@ -414,6 +605,9 @@ class LiveAssistPipeline(
             scratchBitmap?.recycle()
             scratchBitmap = null
             scratchCanvas = null
+            detectionBitmap?.recycle()
+            detectionBitmap = null
+            detectionCanvas = null
             // Closed on the OCR thread, after any recognition still running there.
             ocrThread.execute { ocr?.close() }
             ocrThread.shutdown()
@@ -431,6 +625,10 @@ class LiveAssistPipeline(
         val now = SystemClock.elapsedRealtime()
         frameId++
         lastFrameSize = frame.size
+        // Acquisition: how long the frame spent being converted and waiting for this thread.
+        // Measured here rather than estimated, because the conversion allocates two bitmaps per
+        // frame and nobody has yet established what that costs on a device.
+        if (frame.capturedAtMs > 0L) frameLatency.record(now - frame.capturedAtMs)
 
         // --- Pipeline B: hand tracking, every frame ---------------------------------------
         val handStart = SystemClock.elapsedRealtime()
@@ -441,6 +639,7 @@ class LiveAssistPipeline(
             null
         }
         val handMs = SystemClock.elapsedRealtime() - handStart
+        if (hand != null) handLatency.record(handMs)
         val raw = hand?.let { FingertipPoint(it.x, it.y, it.score) }
         val smoothed = raw?.let {
             val (sx, sy) = smoother.filter(it.x / frame.size.width, it.y / frame.size.height, now)
@@ -476,8 +675,20 @@ class LiveAssistPipeline(
         // else. One source, two consumers.
         val guidance = guidanceInput(now, smoothed, steady)
         if (phase == AssistancePhase.GuidingFinger) {
+            val decisionStart = SystemClock.elapsedRealtime()
             output = engine.update(guidance)
+            // Fingertip to decision: the geometry, not the waiting.
+            decisionLatency.record(SystemClock.elapsedRealtime() - decisionStart)
+
+            // How long a direction waited before the announcer let it through. This is the
+            // part that is policy rather than computation, and the part a user experiences
+            // as the app being slow to react.
+            if (output.direction != lastDecidedDirection) {
+                lastDecidedDirection = output.direction
+                directionDecidedAtMs = now
+            }
             val toSpeak = announcer.onDirection(output.direction, now)
+            if (toSpeak != null) announceLatency.record(now - directionDecidedAtMs)
             if (toSpeak != null && !speechMuted) {
                 // TARGET_UNCERTAIN is one direction but several situations, and saying "I have
                 // lost the button, keep the screen in view" when the real problem is unreadable
@@ -489,11 +700,28 @@ class LiveAssistPipeline(
                 }
                 message?.let(listener::onSpeak)
             }
+            // Felt on every frame, not only when the spoken cue changes: the rhythm is a
+            // continuous signal and that is the point of it.
+            listener.onHaptic(haptics.cue(output.direction, output.zoneOffsetX, output.zoneOffsetY, now))
+
             if (output.direction == GuidanceDirection.ON_TARGET) {
                 // Guidance ends here; the user presses the button themselves.
                 phase = AssistancePhase.WaitingForScreenChange
             }
             publish(direction = output.direction)
+        }
+
+        frameTotalLatency.record(SystemClock.elapsedRealtime() - now)
+        if (diagnosticsEnabled && now - lastLatencyLogMs >= LATENCY_LOG_INTERVAL_MS) {
+            lastLatencyLogMs = now
+            // Every stage of the critical path, so the dominant one is identified rather than
+            // guessed at. Read these together: `frame` + `total` bound the frame rate, and
+            // `announce-wait` is the part that is policy rather than computation.
+            Log.i(TAG, "LATENCY frame-acquire ${frameLatency.summary()}")
+            Log.i(TAG, "LATENCY hand ${handLatency.summary()}")
+            Log.i(TAG, "LATENCY decide ${decisionLatency.summary()}")
+            Log.i(TAG, "LATENCY announce-wait ${announceLatency.summary()}")
+            Log.i(TAG, "LATENCY frame-total ${frameTotalLatency.summary()}")
         }
 
         logTransitions(output, now)
@@ -530,6 +758,8 @@ class LiveAssistPipeline(
         acquisitionRuns = 0
         lastAnchorMs = Long.MIN_VALUE / 2
         screenChangeSuspected = false
+        pendingScreenChange = false
+        markChangeResolved("Acquiring", SystemClock.elapsedRealtime())
         lastSignature = null
         blurredSinceMs = null
         resetSharpnessReference()
@@ -580,18 +810,47 @@ class LiveAssistPipeline(
         val anchorRegion = if (anchoring) tracker.anchorRegion(frame.size) else null
         val anchorStale = target != null && !target.isFreshAt(now)
 
+        // A full scan may not start again until at least as long as the last one took.
+        //
+        // Measured at a coffee machine (SM-S731B): whole-frame scans of 1.9 s ran back to back,
+        // 64 of them, because the acquiring branch has no floor for its first runs and the
+        // screen-change trigger fires constantly on a hand-held phone. Both threads were
+        // saturated by OCR that was re-reading the same screen, which is what the user feels as
+        // the app being slow — fingertip tracking shares the pipeline thread.
+        //
+        // Self-tuning rather than a new constant: where a scan costs 150 ms nothing changes,
+        // and where it costs 1.9 s the duty cycle halves. The cost is measured, not guessed.
+        //
+        // **Capped.** Without the cap a single pathological run poisons the floor for as long
+        // as it lasted: a 99 s scan was measured on the device (1599 blocks, discarded as
+        // noise) and would have blocked every further full scan for another 99 s. The floor
+        // exists to halve a duty cycle, not to stall the app, so it never exceeds the
+        // last-resort interval that already keeps acquisition moving.
+        val fullScanFloorMs = maxOf(OCR_MIN_INTERVAL_MS, minOf(lastOcrMs, ACQUIRE_FALLBACK_MS))
+        val fullScanReady = now - lastOcrStartMs >= fullScanFloorMs
+
         val due: OcrKind? = when {
             acquiring -> {
                 val settled = !blurred
                 val floor = if (acquisitionRuns >= ACQUIRE_MAX_FAST_RUNS) ACQUIRE_BACKOFF_MS else 0L
-                val ready = now - lastOcrStartMs >= floor &&
+                val ready = fullScanReady && now - lastOcrStartMs >= floor &&
                     (settled || now - lastOcrStartMs >= ACQUIRE_FALLBACK_MS)
                 if (ready) OcrKind.Full else null
             }
-            // Explicit user request always re-reads everything.
+            // Explicit user request always re-reads everything, at once: the user asked.
             rescanRequested -> OcrKind.Full
             // Something changed away from the hand: only a full frame can confirm a transition.
-            maybeScreenChanged(frame, fingertip, now) -> OcrKind.Full
+            //
+            // Remembered rather than acted on immediately, because the signature is consumed by
+            // the comparison. Dropping the result when a scan is not affordable yet would lose
+            // the change entirely; holding it means the scan happens late rather than never.
+            run {
+                if (maybeScreenChanged(frame, fingertip, now)) {
+                    pendingScreenChange = true
+                    markChangeUnresolved("SignatureChanged", now)
+                }
+                pendingScreenChange && fullScanReady
+            } -> OcrKind.Full
             // Defined fallback: region runs have stopped finding the label for long enough that
             // the position is no longer usable. Find out why by reading the whole screen.
             anchorStale && now - lastOcrStartMs >= STALE_FALLBACK_MS -> OcrKind.Full
@@ -608,31 +867,63 @@ class LiveAssistPipeline(
         val region = if (due == OcrKind.Region) {
             anchorRegion?.let { Rect(it[0], it[1], it[2], it[3]) } ?: return false
         } else {
-            null
+            // A full scan still reads only the kiosk screen, once one is being tracked.
+            //
+            // Measured on the device: pointed at a monitor showing the mock kiosk, a
+            // whole-frame scan took **37.6 s** and its result arrived 43 s stale, so the
+            // labels plainly visible in the frame had never been read and every request came
+            // back "not on screen". Most of that frame is not the kiosk — browser chrome,
+            // tabs, an address bar, the desk — and Tesseract works through all of it.
+            //
+            // The quadrilateral is already known, and the same region mechanism already
+            // serves re-anchoring at ~34 ms against 442-568 ms for a full frame (R-11).
+            screenScanRegion(now, frame.size)
         }
 
         reanchorRequested = false
+        if (due == OcrKind.Full) pendingScreenChange = false
         ocrInFlight = true
-        if (region == null) {
+
+        // What kind of run this is, from the decision that was made — not from the shape of
+        // the image it happens to read.
+        //
+        // This was `region != null`, and that proxy stopped being true the moment a full scan
+        // learned to crop itself to the detected screen. From then on **every acquisition scan
+        // was counted and dispatched as a re-anchor**: `ocrJobsStarted` and `lastOcrStartMs`
+        // were never updated, so nothing throttled OCR, and the result went to
+        // `onAnchorResult`, which with no target selected returns `NoTarget` and discards the
+        // text. Measured on the device (SM-S731B): 58 runs in ~40 s, `ocr=0ms/0`,
+        // `anchor=516ms/58`, `update=Anchor:NoTarget`, `lines=0/2` — the screen detected the
+        // whole time and not one recognised line ever reaching the tracker.
+        //
+        // The two ideas were never the same. A region is a crop; an anchor run is a *purpose*.
+        val isAnchorRun = due == OcrKind.Region
+        if (isAnchorRun) {
+            anchorJobsStarted++
+            lastAnchorMs = now
+        } else {
             rescanRequested = false
             if (acquiring) acquisitionRuns++
             ocrJobsStarted++
             lastOcrStartMs = now
-        } else {
-            anchorJobsStarted++
-            lastAnchorMs = now
         }
-        val upscale = upscaleFor(region != null, frame.size)
+        // Still keyed on the crop, deliberately: magnification depends on how much image is
+        // being read, which is a property of the region and not of the run's purpose. A full
+        // scan cropped to the screen is small enough to enlarge, and must keep doing so.
+        val upscale = upscaleFor(region, frame.size)
         val bitmap = frame.bitmap
         val size = frame.size
         val startedAt = now
+        // Recorded here, where the decision is made, rather than reconstructed later from
+        // state that may already have moved on.
+        lastOcrInput = describeOcrInput(region, size, upscale, due)
         try {
             ocrThread.execute {
                 val started = SystemClock.elapsedRealtime()
                 val result = runCatching { ocr.recognize(bitmap, region, upscale) }
                 val elapsed = SystemClock.elapsedRealtime() - started
                 bitmap.recycle()
-                executor.execute { onOcrResult(result, size, elapsed, startedAt, region != null) }
+                executor.execute { onOcrResult(result, size, elapsed, startedAt, isAnchorRun) }
             }
         } catch (_: RejectedExecutionException) {
             ocrInFlight = false
@@ -649,12 +940,53 @@ class LiveAssistPipeline(
      * small. The rule itself lives in [OcrUpscale] so the evaluation harness can apply exactly
      * the same one to still photographs.
      */
-    private fun upscaleFor(isRegion: Boolean, frame: FrameSize): Float =
-        if (isRegion) {
+    private fun upscaleFor(region: Rect?, frame: FrameSize): Float {
+        val wanted = if (region != null) {
             regionUpscale
         } else {
             OcrUpscale.forLabelHeights(tracker.snapshot.map { it.boundingBox.height }, frame.height)
         }
+        // Against the image Tesseract will actually be given, not against the frame it came
+        // from. The budget bounds *recognition*, and recognition sees the crop: measured on a
+        // 720x1280 frame, charging a re-anchor crop of 200x60 for the whole frame's pixels cut
+        // its magnification from 2x to 1.54x — on the one path where magnification matters
+        // most, because a region run is how a target's position stays fresh under blur (R-12).
+        // `OcrPixelBudgetTest` had always asserted the crop-sized behaviour; production simply
+        // never called it that way.
+        return OcrUpscale.cappedToPixelBudget(
+            wanted,
+            region?.width() ?: frame.width,
+            region?.height() ?: frame.height,
+        )
+    }
+
+    /** Exactly what Tesseract is about to be given, for the developer overlay. */
+    private fun describeOcrInput(region: Rect?, size: FrameSize, upscale: Float, kind: OcrKind?): String {
+        // Every number is formatted on its own and the sentence is assembled by interpolation.
+        //
+        // The obvious version — build `source`, then `.format()` the whole sentence — crashed
+        // on the device: the inner format emits a literal '%', and the outer one re-parses the
+        // resulting "% o" of "(12% of frame)" as an octal conversion, throwing
+        // IllegalFormatConversionException on the pipeline thread. A format string must never
+        // be built from text that already contains a percent sign.
+        val width = region?.width() ?: size.width
+        val height = region?.height() ?: size.height
+        val outWidth = (width * upscale).toInt()
+        val outHeight = (height * upscale).toInt()
+        val factor = String.format(Locale.ROOT, "%.1f", upscale)
+        val label = kind?.name ?: "OCR"
+        return if (region == null) {
+            "$label WHOLE FRAME ${size.width}x${size.height} -> ${outWidth}x$outHeight @${factor}x"
+        } else {
+            val share = String.format(
+                Locale.ROOT,
+                "%.0f",
+                100f * width * height / (size.width.toFloat() * size.height),
+            )
+            "$label crop ${region.left},${region.top} ${width}x$height ($share% of frame)" +
+                " -> ${outWidth}x$outHeight @${factor}x"
+        }
+    }
 
     private enum class OcrKind { Full, Region }
 
@@ -663,7 +995,8 @@ class LiveAssistPipeline(
         size: FrameSize,
         elapsedMs: Long,
         startedAtMs: Long,
-        wasRegion: Boolean,
+        /** True only for a re-anchor run. Not "the image was cropped" — see [maybeStartOcr]. */
+        wasAnchorRun: Boolean,
     ) {
         ocrInFlight = false
         if (released) return
@@ -673,7 +1006,7 @@ class LiveAssistPipeline(
             return
         }
 
-        if (wasRegion) {
+        if (wasAnchorRun) {
             lastAnchorOcrMs = elapsedMs
             // A region result can only re-anchor; it never votes on the screen's identity.
             val outcome = tracker.onAnchorResult(blocks, size, now)
@@ -685,11 +1018,51 @@ class LiveAssistPipeline(
                 AnchorUpdate.NoTarget -> Unit
             }
             lastOcrUpdate = "Anchor:" + outcome.name
+            // Logged here, before the early return that used to swallow it.
+            //
+            // The `OCR in=` line below is reached only by full scans, so **no re-anchor run
+            // has ever appeared in a device capture** — 88 runs in the first validation
+            // capture, every one of them a full scan, with the cheap path that keeps a
+            // target's position fresh while the user is reaching entirely invisible. That is
+            // the path R-11 measured at ~34 ms against 442-568 ms, and the one guidance
+            // depends on; not being able to see it is how R-30 went unnoticed for a week.
+            //
+            // Counts and timings only. The recognised text is kiosk screen content and stays
+            // in the overlay, as it does for full scans.
+            if (diagnosticsEnabled) {
+                Log.i(
+                    TAG,
+                    "ANCHOR in=${lastOcrInput ?: "-"} ${elapsedMs}ms blocks=${blocks.size} " +
+                        "-> ${outcome.name} refreshed=$anchorsRefreshed missed=$anchorsNotSeen",
+                )
+            }
             return
         }
 
         lastOcrMs = elapsedMs
         lastOcrFinishedMs = now
+
+        // Before the tracker sees them. The same predicate the tracker applies, so the overlay
+        // and the behaviour can never disagree about why a line was discarded.
+        ocrRawBlocks = blocks.size
+        ocrRetainedBlocks = blocks.count(TargetTracker::isRetainable)
+        ocrDroppedLowConfidence = blocks.count { it.confidence < TargetTracker.MIN_RETAINED_CONFIDENCE }
+        ocrDroppedTooFewLetters = blocks.count {
+            it.confidence >= TargetTracker.MIN_RETAINED_CONFIDENCE && !TargetTracker.isRetainable(it)
+        }
+        ocrRawText = blocks.map { block ->
+            val verdict = TargetTracker.rejectionFor(block)?.let { "DROPPED: $it" } ?: "kept"
+            "%.2f %s  [%s]".format(block.confidence, block.text.trim(), verdict)
+        }
+        if (diagnosticsEnabled) {
+            // Counts only. The text itself is kiosk screen content and stays on the device, in
+            // the overlay, rather than going to logcat.
+            Log.i(
+                TAG,
+                "OCR in=${lastOcrInput ?: "-"} ${elapsedMs}ms raw=$ocrRawBlocks kept=$ocrRetainedBlocks " +
+                    "droppedLowConf=$ocrDroppedLowConfidence droppedShort=$ocrDroppedTooFewLetters",
+            )
+        }
 
         // A run that returns implausibly many lines did not read a screen; it read noise.
         // Pointed at a dark desk, Tesseract produced **495 lines** in a 12.3 s run, against
@@ -715,6 +1088,9 @@ class LiveAssistPipeline(
         when (update) {
             is OcrUpdate.ScreenChanged -> {
                 screenChangeSuspected = false
+                // Answered: the kiosk did move on, the snapshot now holds the new screen's
+                // text, and acquisition below decides when it is worth speaking about.
+                markChangeResolved("ScreenChanged", now)
                 consistentRuns = 0
                 if (update.hadTarget) {
                     resetGuidance()
@@ -728,6 +1104,7 @@ class LiveAssistPipeline(
 
             OcrUpdate.ScreenChangeSuspected -> {
                 screenChangeSuspected = true
+                markChangeUnresolved("ScanSuspectsChange", now)
                 consistentRuns = 0
             }
 
@@ -750,6 +1127,9 @@ class LiveAssistPipeline(
 
             OcrUpdate.Unchanged -> {
                 screenChangeSuspected = false
+                // Answered the other way: this run read the same screen, so the suspicion is
+                // refuted and what the app knows describes the screen again.
+                markChangeResolved("Unchanged", now)
                 unreadableRuns = 0
                 lastAnchorMs = now
                 consistentRuns++
@@ -791,9 +1171,13 @@ class LiveAssistPipeline(
     /**
      * What to say when no direction can be given.
      *
-     * The app has no kiosk-screen detector — the frame *is* the screen (see `FrameGeometry`) —
-     * so it must never claim to have lost a screen it never tracked. Each case names what is
-     * actually wrong and what would fix it.
+     * A kiosk screen **is** tracked (see [ScreenDetector] and [ScreenTracker]), so losing it is
+     * a real state the user can be told about and asked to fix. This comment previously said
+     * the opposite — that the frame *is* the screen — which stopped being true at R-21.
+     *
+     * The ordering below is deliberate: unreadable text is reported before a missing screen,
+     * because both can be true at once and only one of them the user can act on usefully.
+     * Each case names what is actually wrong and what would fix it.
      */
     private fun messageForUncertainty(reason: GuidanceUnavailable?): SpokenMessage? = when {
         // Nothing is selected: guidance is not running, so there is nothing to report.
@@ -916,6 +1300,50 @@ class LiveAssistPipeline(
     }
 
     /**
+     * The part of the frame a full scan should read: the tracked screen, or all of it.
+     *
+     * Padded slightly, because the detected quadrilateral sits on the panel's bright area and
+     * a label can touch its edge. Returns null when no screen is tracked, which keeps the old
+     * whole-frame behaviour for acquisition — the app has to be able to read a screen it has
+     * not located yet.
+     */
+    private fun screenScanRegion(now: Long, size: FrameSize): Rect? {
+        // Only a **settled** quadrilateral may narrow the scan.
+        //
+        // Measured at a real coffee machine (SM-S731B): the detector reported a screen on all
+        // 212 attempts and refused on none, with confidence 0.89-0.97 — while the crop jumped
+        // from `754,0 471x518` to `200,154 390x771` to `0,0 546x1280` within a second. The
+        // machine's screen filled the frame, so there was no dark housing to find; the detector
+        // segmented the screen's own bright content — the white drink cards — and picked a
+        // different cluster of them each time. A card cluster is rectangular, well filled and
+        // well separated from the grey gaps, so it scores highly while being the wrong thing,
+        // which is precisely the "confident wrong rectangle" ScreenDetector's own documentation
+        // warns must never reach anything downstream.
+        //
+        // Each scan therefore read a different fragment, and the snapshot it replaced was often
+        // better than the one replacing it: lines went 29 -> 23 -> 5 -> 2. The crop also clipped
+        // real text, turning „ამერიკანო" into „ერიკანო".
+        //
+        // `stable` already means "three consecutive detections agreed", and ScreenTracker
+        // restarts the run whenever a corner jumps more than a quarter of the diagonal. Reusing
+        // it costs nothing and invents no new threshold: while the quadrilateral is jittering
+        // the scan falls back to the whole frame, which on this content measured 362 ms.
+        val screen = screenTracker.geometry(now)?.takeIf { it.stable } ?: return null
+        val corners = screen.quad.corners
+        val padX = size.width * SCAN_PAD_FRACTION
+        val padY = size.height * SCAN_PAD_FRACTION
+        val left = (corners.minOf { it.x } - padX).toInt().coerceAtLeast(0)
+        val top = (corners.minOf { it.y } - padY).toInt().coerceAtLeast(0)
+        val right = (corners.maxOf { it.x } + padX).toInt().coerceAtMost(size.width)
+        val bottom = (corners.maxOf { it.y } + padY).toInt().coerceAtMost(size.height)
+
+        // A degenerate or near-whole-frame region buys nothing and risks cropping text out.
+        if (right - left < size.width / 4 || bottom - top < size.height / 4) return null
+        if ((right - left) >= size.width && (bottom - top) >= size.height) return null
+        return Rect(left, top, right, bottom)
+    }
+
+    /**
      * Looks for the kiosk screen, on a timer rather than on every frame.
      *
      * A handheld phone does not move appreciably between two consecutive frames, so detecting
@@ -928,7 +1356,7 @@ class LiveAssistPipeline(
         if (now - lastScreenDetectMs < SCREEN_DETECT_INTERVAL_MS) return
         lastScreenDetectMs = now
 
-        val pixels = scaledPixels(frame.bitmap) ?: return
+        val pixels = detectionPixels(frame.bitmap) ?: return
         for (i in pixels.indices) {
             val argb = pixels[i]
             // Rec. 601 luma, integer-weighted to stay off the floating-point path on a
@@ -940,13 +1368,13 @@ class LiveAssistPipeline(
                 ) / 1000
         }
 
-        val candidate = screenDetector.detect(luminanceScratch, SIGNATURE_SOURCE, SIGNATURE_SOURCE)
+        val candidate = screenDetector.detect(luminanceScratch, DETECTION_GRID, DETECTION_GRID)
         // The grid is square and the frame is not, so each axis is unsquashed separately.
         val inFrame = candidate?.let {
             it.copy(
                 quad = it.quad.scaled(
-                    frame.size.width.toFloat() / SIGNATURE_SOURCE,
-                    frame.size.height.toFloat() / SIGNATURE_SOURCE,
+                    frame.size.width.toFloat() / DETECTION_GRID,
+                    frame.size.height.toFloat() / DETECTION_GRID,
                 ),
             )
         }
@@ -998,6 +1426,13 @@ class LiveAssistPipeline(
             frameWidth = size.width,
             frameHeight = size.height,
             nowMs = now,
+            // Either kind of evidence that the kiosk has moved on: a comparison that already
+            // said so, or one that is waiting for a scan it can afford. Both mean the labels
+            // in this scene may describe the previous screen.
+            // All three: a comparison that already said so, one waiting for a scan it can
+            // afford, and one whose scan is still running. Any of them means the labels in
+            // this scene may describe the previous screen.
+            changeSuspected = screenChangeSuspected || pendingScreenChange || changeUnresolved,
         )
     }
 
@@ -1018,6 +1453,33 @@ class LiveAssistPipeline(
      * most once, and so the two can never end up looking at differently scaled versions of it.
      * The returned array is the scratch buffer itself and is overwritten by the next call.
      */
+    /**
+     * The frame at [DETECTION_GRID], for screen detection only.
+     *
+     * Kept apart from the change signature's 64x64 because the two want different things from
+     * the same frame. The signature asks "is this still the same screen", which survives being
+     * coarse. Detection produces the **corners**, and a corner is only ever as precise as one
+     * cell of the grid it was found on: at 64 that is 11 px across and 20 px down on a
+     * 720x1280 frame, which `SPIKES_AND_DECISIONS` records as the same order as the on-target
+     * zone itself. Halving that error costs one extra downscale and four times a detection
+     * measured in fractions of a millisecond, every 220 ms.
+     */
+    private fun detectionPixels(bitmap: Bitmap): IntArray? {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return null
+        val scratch = detectionBitmap ?: createBitmap(DETECTION_GRID, DETECTION_GRID).also {
+            detectionBitmap = it
+            detectionCanvas = Canvas(it)
+        }
+        val canvas = detectionCanvas ?: return null
+        scratchMatrix.setScale(
+            DETECTION_GRID.toFloat() / bitmap.width,
+            DETECTION_GRID.toFloat() / bitmap.height,
+        )
+        canvas.drawBitmap(bitmap, scratchMatrix, scratchPaint)
+        scratch.getPixels(detectionPixels, 0, DETECTION_GRID, 0, 0, DETECTION_GRID, DETECTION_GRID)
+        return detectionPixels
+    }
+
     private fun scaledPixels(bitmap: Bitmap): IntArray? {
         if (bitmap.width <= 0 || bitmap.height <= 0) return null
         val scratch = scratchBitmap ?: createBitmap(SIGNATURE_SOURCE, SIGNATURE_SOURCE).also {
@@ -1135,8 +1597,13 @@ class LiveAssistPipeline(
                 else -> speak(SpokenMessage.ScreenContents(ScreenReader.read(tracker.snapshot)))
             }
             AssistCommand.Stop -> stopGuidance(announce = true)
-            // Handled by the ViewModel, which owns the last spoken message.
-            AssistCommand.Repeat, AssistCommand.Unknown -> Unit
+            // Handled by the ViewModel: it owns the last spoken message, and it owns the
+            // offer a confirmation answers — the pipeline has no notion of a pending offer.
+            AssistCommand.Repeat,
+            AssistCommand.Confirm,
+            AssistCommand.Cancel,
+            AssistCommand.Unknown,
+            -> Unit
         }
     }
 
@@ -1160,11 +1627,22 @@ class LiveAssistPipeline(
             it is TargetMatch.NotFound && it.reason == Rejection.UnconfirmedLabel
         }
 
+        // How much of what we know came from the **newest** run.
+        //
+        // Saying "that is not on this screen" is a claim about the screen as it is now, and it
+        // may only be made from a scan that actually read it. When the retained model is mostly
+        // carried forward — the latest run contributed almost nothing — the honest answer is
+        // that the screen could not be read, not that the option is absent. Those were the same
+        // sentence before, which is how a readable screen produced confident false denials.
+        val freshlyRead = labels.count { it.runsAgo == 0 }
+        val screenReadThisScan = freshlyRead >= TargetTracker.MIN_INFORMATIVE_LINES
+
         lastMatchOutcome = when {
             found != null -> "FOUND '${found.block.text.trim()}'"
             ambiguous != null -> "AMBIGUOUS"
             unconfirmed -> "UNCONFIRMED (blur) — holding request"
             imageUnreliable() -> "IMAGE POOR — holding request"
+            !screenReadThisScan -> "SCREEN NOT READ THIS SCAN ($freshlyRead fresh of ${labels.size})"
             else -> "NO SIMILAR LABEL"
         } + " for '${queries.first()}'"
 
@@ -1209,13 +1687,24 @@ class LiveAssistPipeline(
             // Either the label was read but not confirmed, or the picture is currently too
             // poor to conclude anything from. Neither justifies telling the user the button
             // is not there.
-            (unconfirmed || imageUnreliable()) && stillWorthRetrying(now) -> {
+            // The screen is known only from older runs, so this scan cannot support a denial.
+            (unconfirmed || imageUnreliable() || !screenReadThisScan) && stillWorthRetrying(now) -> {
                 defer(queries, now, SpokenMessage.HoldStill)
                 requestScreen()
                 phase = AssistancePhase.ScreenReady
                 publish(direction = null)
             }
 
+            // Out of retries and still unable to read the screen: say *that*, rather than
+            // asserting an absence the app has no evidence for.
+            !screenReadThisScan -> {
+                clearPending()
+                phase = AssistancePhase.ScreenReady
+                speak(SpokenMessage.CannotReadText)
+                publish(direction = null)
+            }
+
+            // The screen was read well this scan and the option is not on it. Only here.
             else -> {
                 clearPending()
                 phase = AssistancePhase.ScreenReady
@@ -1277,6 +1766,8 @@ class LiveAssistPipeline(
     }
 
     private fun resetGuidance() {
+        haptics.reset()
+        listener.onHaptic(HapticCue.Silent)
         engine.reset()
         announcer.reset()
     }
@@ -1349,6 +1840,48 @@ class LiveAssistPipeline(
             ?: ("none: " + (handTracker?.lastMiss ?: "tracker not loaded"))
         val box = target?.let { String.format(Locale.ROOT, " box=%.0f,%.0f", it.box.centerX, it.box.centerY) } ?: ""
         val usable = target?.let { if (it.isReliableAt(now)) " usable" else " UNUSABLE" } ?: ""
+        // One line that answers "which stage is failing" without the overlay. Deliberately
+        // carries no recognised text: that is kiosk screen content and stays in `blocks`,
+        // which only the developer overlay on a debuggable build ever renders.
+        val screen = screenTracker.geometry(now)
+        Log.i(
+            TAG,
+            "SCREEN " + (
+                if (screen != null) {
+                    String.format(
+                        Locale.ROOT,
+                        "tracked conf=%.2f stable=%b age=%dms rectifies=%b cropScan=%b",
+                        screen.confidence, screen.stable, screen.ageMs,
+                        screen.toScreenSpace != null,
+                        screenScanRegion(now, lastFrameSize) != null,
+                    )
+                } else {
+                    String.format(
+                        Locale.ROOT,
+                        "NONE reject=%s coverage=%.3f (min %.2f) wouldScore=%.2f " +
+                            "fill=%.2f rect=%.2f sep=%.2f loss=%s",
+                        screenDetector.lastRejection?.name ?: "-",
+                        screenDetector.lastCoverage, ScreenDetector.MIN_COVERAGE,
+                        screenDetector.lastRejectedConfidence,
+                        screenDetector.lastFill, screenDetector.lastRectangularity,
+                        screenDetector.lastSeparation,
+                        screenTracker.loss(now)?.name ?: "-",
+                    )
+                }
+                ),
+        )
+        Log.i(
+            TAG,
+            String.format(
+                Locale.ROOT,
+                "ACQUIRE runs=%d/%d lines=%d/%d upscale=%.1fx lastOcr=%s ocrMs=%d",
+                consistentRuns, ACQUISITION_RUNS,
+                tracker.snapshot.size, TargetTracker.MIN_INFORMATIVE_LINES,
+                upscaleFor(screenScanRegion(now, lastFrameSize), lastFrameSize),
+                lastOcrUpdate ?: "-",
+                lastOcrMs,
+            ),
+        )
         Log.i(
             TAG,
             "phase=$phase hand=${handMs}ms tip=$tip dir=${output?.direction ?: "-"} " +
@@ -1424,6 +1957,26 @@ class LiveAssistPipeline(
                 handInferences = handTracker?.inferences ?: 0L,
                 handsSeen = handTracker?.handsSeen ?: 0L,
                 frameLuminance = lastFrameLuminance,
+                screenRejection = screenDetector.lastRejection?.name,
+                screenCoverage = screenDetector.lastCoverage,
+                screenFill = screenDetector.lastFill,
+                screenRectangularity = screenDetector.lastRectangularity,
+                screenSeparation = screenDetector.lastSeparation,
+                screenLoss = screenTracker.loss(now)?.name,
+                rectifies = screen?.toScreenSpace != null,
+                consistentRuns = consistentRuns,
+                acquisitionRunsNeeded = ACQUISITION_RUNS,
+                retainedLines = tracker.snapshot.size,
+                informativeLinesNeeded = TargetTracker.MIN_INFORMATIVE_LINES,
+                fullScanUpscale = upscaleFor(screenScanRegion(now, frame.size), frame.size),
+                ocrInput = lastOcrInput,
+                ocrLanguages = KioskOcrEngine.LANGUAGES,
+                ocrRawBlocks = ocrRawBlocks,
+                ocrRetainedBlocks = ocrRetainedBlocks,
+                ocrDroppedLowConfidence = ocrDroppedLowConfidence,
+                ocrDroppedTooFewLetters = ocrDroppedTooFewLetters,
+                ocrRawText = ocrRawText,
+                scanCroppedToScreen = screenScanRegion(now, frame.size) != null,
                 screenQuad = screen?.quad,
                 screenConfidence = screen?.confidence ?: 0f,
                 screenStable = screen?.stable == true,
@@ -1482,10 +2035,22 @@ class LiveAssistPipeline(
         const val SIGNATURE_SOURCE = 64
 
         /**
+         * Grid the kiosk screen is detected on. Twice the signature's, because this one
+         * decides where the corners are and the other only whether the picture changed.
+         */
+        const val DETECTION_GRID = 128
+
+        /**
          * How often the kiosk screen is looked for. Fast enough to follow a phone being
          * repositioned, far slower than the frame rate, which the hand tracking owns.
          */
         const val SCREEN_DETECT_INTERVAL_MS = 220L
+
+        /** Slack around the detected screen, so a label touching its edge is not clipped. */
+        const val SCAN_PAD_FRACTION = 0.02f
+
+        /** How often the latency summary is printed. Throttled; this runs per frame. */
+        const val LATENCY_LOG_INTERVAL_MS = 5_000L
 
         /**
          * Lines above which a run is treated as noise rather than a screen.

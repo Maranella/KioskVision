@@ -42,6 +42,24 @@ object AssistantToolSchema {
                 parameters = emptyMap(),
             ),
             FunctionDeclaration(
+                name = AssistantTools.COMPARE_PRICES,
+                description = "Answer what something costs, or which of two options is " +
+                    "cheaper. Call this whenever the user asks about a price, an amount or " +
+                    "value for money. You cannot see the screen and will not be told the " +
+                    "amounts: pass the user's own words and the app says the answer aloud.",
+                parameters = mapOf(
+                    AssistantTools.QUERY_ARGUMENT to Schema.string(
+                        description = "One option the user named, in Georgian, e.g. \"ამერიკანო\". " +
+                            "Omit if they asked generally which is cheapest.",
+                        nullable = true,
+                    ),
+                    AssistantTools.SECOND_QUERY_ARGUMENT to Schema.string(
+                        description = "The other option, when they are comparing two.",
+                        nullable = true,
+                    ),
+                ),
+            ),
+            FunctionDeclaration(
                 name = AssistantTools.STOP_GUIDANCE,
                 description = "Stop guiding the finger. Call this when the user asks you to stop.",
                 parameters = emptyMap(),
@@ -90,6 +108,8 @@ object AssistantPrompt {
         append("When they ask where something is, which button to press, or how to continue, ")
         append("call select_target. When they ask what is on the screen, call read_screen. ")
         append("When they ask you to stop, call stop_guidance. ")
+        append("When they ask what something costs or which option is cheaper, call ")
+        append("compare_prices. ")
         append("Prefer calling a function over describing what you would do. ")
 
         // Without this the model treated every outcome as success and answered "I will show
@@ -111,7 +131,11 @@ object AssistantPrompt {
         append("'reading' — the app is reading the screen aloud right now, so SAY NOTHING ")
         append("and do not announce it; ")
         append("'screennotreadable' — ask them to move a little closer; ")
-        append("'noscreen' — ask them to point the phone at the kiosk screen. ")
+        append("'noscreen' — ask them to point the phone at the kiosk screen; ")
+        append("'comparing' — the app is saying the amounts aloud right now, so SAY NOTHING ")
+        append("about any price: you have not seen one; ")
+        append("'priceunknown' — the prices could not be read reliably, say so and suggest ")
+        append("holding the phone closer and steadier. ")
         append("NEVER say you will show or find something when the outcome was not 'guiding'. ")
         // The app speaks the specifics itself, in its own voice, from what the camera saw.
         // Without this the two voices say the same thing one after the other.
